@@ -14,7 +14,7 @@ if os.getenv('YOUTUBE_COOKIES'):
         f.write(os.getenv('YOUTUBE_COOKIES'))
 
 ytdl_format_options = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio/best/bestaudio*/best*',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
     'noplaylist': False, # We want to handle playlists
@@ -28,7 +28,7 @@ ytdl_format_options = {
     'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
     'extractor_args': {
         'youtube': {
-            'player_client': ['ios', 'android_vr', 'tvhtml5', 'web_creator', 'mweb']
+            'player_client': ['mweb', 'ios', 'android', 'web']
         }
     }
 }
