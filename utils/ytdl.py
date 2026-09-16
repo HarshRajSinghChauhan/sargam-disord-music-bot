@@ -2,20 +2,69 @@ import asyncio
 import discord
 import yt_dlp
 import os
+import json
 
 # Suppress noise about console usage from errors
 yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
+
+def format_as_netscape_cookies(content):
+    if not content:
+        return ""
+        
+    content = content.replace('\\n', '\n').strip()
+    
+    # 1. Already Netscape format (contains tabs or # Netscape header)
+    if '# Netscape' in content or '\t' in content:
+        if not content.startswith('# Netscape'):
+            content = '# Netscape HTTP Cookie File\n' + content
+        return content
+        
+    # 2. JSON format (e.g., exported from EditThisCookie / Cookie-Editor)
+    if content.startswith('[') and content.endswith(']'):
+        try:
+            data = json.loads(content)
+            lines = ['# Netscape HTTP Cookie File']
+            for item in data:
+                domain = item.get('domain', '.youtube.com')
+                flag = 'TRUE' if domain.startswith('.') else 'FALSE'
+                path = item.get('path', '/')
+                secure = 'TRUE' if item.get('secure') else 'FALSE'
+                expiration = str(int(item.get('expirationDate', 2147483647)))
+                name = item.get('name', '')
+                value = item.get('value', '')
+                if name:
+                    lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expiration}\t{name}\t{value}")
+            print(f"Parsed JSON cookies into {len(lines)-1} Netscape entries")
+            return '\n'.join(lines)
+        except Exception as e:
+            print(f"Error parsing JSON cookies: {e}")
+
+    # 3. Header format (e.g., "SID=xxx; HSID=yyy; VISITOR_INFO1_LIVE=zzz")
+    lines = ['# Netscape HTTP Cookie File']
+    if content.lower().startswith('cookie:'):
+        content = content[7:].strip()
+    
+    pairs = content.split(';')
+    for pair in pairs:
+        if '=' in pair:
+            name, value = pair.split('=', 1)
+            name = name.strip()
+            value = value.strip()
+            if name and value:
+                lines.append(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}")
+                
+    if len(lines) > 1:
+        print(f"Parsed header cookies into {len(lines)-1} Netscape entries")
+        return '\n'.join(lines)
+        
+    return content
 
 def get_ytdl_instance():
     cookies_path = 'cookies.txt'
     cookies_env = os.getenv('YOUTUBE_COOKIES')
     
     if cookies_env:
-        # Handle literal \n if Render escaped multiline env variable
-        cookies_content = cookies_env.replace('\\n', '\n').strip()
-        if not cookies_content.startswith('# Netscape'):
-            cookies_content = '# Netscape HTTP Cookie File\n' + cookies_content
-            
+        cookies_content = format_as_netscape_cookies(cookies_env)
         with open(cookies_path, 'w', encoding='utf-8') as f:
             f.write(cookies_content)
             
@@ -34,14 +83,13 @@ def get_ytdl_instance():
         'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
         'extractor_args': {
             'youtube': {
-                'player_client': ['web', 'mweb', 'ios', 'android']
+                'player_client': ['tv_embedded', 'web', 'mweb', 'android']
             }
         }
     }
     
     if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
         options['cookiefile'] = cookies_path
-        print("Using cookies.txt for yt-dlp extraction")
 
     return yt_dlp.YoutubeDL(options)
 
@@ -93,7 +141,18 @@ class YTDLSource(discord.PCMVolumeTransformer):
         
         def _extract():
             ytdl = get_ytdl_instance()
-            return ytdl.extract_info(webpage_url, download=False)
+            try:
+                return ytdl.extract_info(webpage_url, download=False)
+            except Exception as e:
+                print(f"Primary stream extraction failed for {webpage_url}: {e}. Retrying with search fallback...")
+                # Fallback: search by URL or ID using ytsearch
+                fallback_ytdl = yt_dlp.YoutubeDL({
+                    'format': 'bestaudio/best/bestaudio*/best*',
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extractor_args': {'youtube': {'player_client': ['tv_embedded', 'android']}}
+                })
+                return fallback_ytdl.extract_info(f"ytsearch:{webpage_url}", download=False)['entries'][0]
 
         data = await loop.run_in_executor(None, _extract)
         
