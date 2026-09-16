@@ -5,6 +5,14 @@ import yt_dlp
 # Suppress noise about console usage from errors
 yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
 
+import os
+
+# Check for cookies file or environment variable
+cookies_path = 'cookies.txt'
+if os.getenv('YOUTUBE_COOKIES'):
+    with open('cookies.txt', 'w', encoding='utf-8') as f:
+        f.write(os.getenv('YOUTUBE_COOKIES'))
+
 ytdl_format_options = {
     'format': 'bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -20,10 +28,13 @@ ytdl_format_options = {
     'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
     'extractor_args': {
         'youtube': {
-            'player_client': ['android', 'ios', 'mweb']
+            'player_client': ['ios', 'android_vr', 'tvhtml5', 'web_creator', 'mweb']
         }
     }
 }
+
+if os.path.exists(cookies_path):
+    ytdl_format_options['cookiefile'] = cookies_path
 
 ffmpeg_options = {
     'options': '-vn',
