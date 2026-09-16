@@ -34,10 +34,10 @@ def format_as_netscape_cookies(content):
                 value = item.get('value', '')
                 if name:
                     lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expiration}\t{name}\t{value}")
-            print(f"Parsed JSON cookies into {len(lines)-1} Netscape entries")
+            print(f"Parsed JSON cookies into {len(lines)-1} Netscape entries", flush=True)
             return '\n'.join(lines)
         except Exception as e:
-            print(f"Error parsing JSON cookies: {e}")
+            print(f"Error parsing JSON cookies: {e}", flush=True)
 
     # 3. Header format (e.g., "SID=xxx; HSID=yyy; VISITOR_INFO1_LIVE=zzz")
     lines = ['# Netscape HTTP Cookie File']
@@ -54,7 +54,7 @@ def format_as_netscape_cookies(content):
                 lines.append(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}")
                 
     if len(lines) > 1:
-        print(f"Parsed header cookies into {len(lines)-1} Netscape entries")
+        print(f"Parsed header cookies into {len(lines)-1} Netscape entries", flush=True)
         return '\n'.join(lines)
         
     return content
@@ -67,6 +67,7 @@ def get_ytdl_instance():
         cookies_content = format_as_netscape_cookies(cookies_env)
         with open(cookies_path, 'w', encoding='utf-8') as f:
             f.write(cookies_content)
+        print(f"[YTDL] Written cookies.txt (size: {len(cookies_content)} bytes)", flush=True)
             
     options = {
         'format': 'bestaudio/best/bestaudio*/best*',
@@ -93,6 +94,15 @@ def get_ytdl_instance():
 
     return yt_dlp.YoutubeDL(options)
 
+def get_soundcloud_ytdl_instance():
+    return yt_dlp.YoutubeDL({
+        'format': 'bestaudio/best',
+        'quiet': True,
+        'no_warnings': True,
+        'nocheckcertificate': True,
+        'default_search': 'scsearch'
+    })
+
 ffmpeg_options = {
     'options': '-vn',
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
@@ -114,7 +124,12 @@ class YTDLSource(discord.PCMVolumeTransformer):
         
         def _extract():
             ytdl = get_ytdl_instance()
-            return ytdl.extract_info(search, download=False)
+            try:
+                return ytdl.extract_info(search, download=False)
+            except Exception as e:
+                print(f"[YTDL Warning] YouTube search failed for '{search}': {e}. Trying SoundCloud fallback...", flush=True)
+                sc_ytdl = get_soundcloud_ytdl_instance()
+                return sc_ytdl.extract_info(f"scsearch:{search}", download=False)
 
         data = await loop.run_in_executor(None, _extract)
         
@@ -136,23 +151,23 @@ class YTDLSource(discord.PCMVolumeTransformer):
         }
 
     @classmethod
-    async def get_stream_source(cls, webpage_url, *, loop=None):
+    async def get_stream_source(cls, track_info, *, loop=None):
         loop = loop or asyncio.get_event_loop()
+        
+        webpage_url = track_info.get('webpage_url') if isinstance(track_info, dict) else track_info
+        title = track_info.get('title', webpage_url) if isinstance(track_info, dict) else webpage_url
         
         def _extract():
             ytdl = get_ytdl_instance()
             try:
                 return ytdl.extract_info(webpage_url, download=False)
             except Exception as e:
-                print(f"Primary stream extraction failed for {webpage_url}: {e}. Retrying with search fallback...")
-                # Fallback: search by URL or ID using ytsearch
-                fallback_ytdl = yt_dlp.YoutubeDL({
-                    'format': 'bestaudio/best/bestaudio*/best*',
-                    'quiet': True,
-                    'no_warnings': True,
-                    'extractor_args': {'youtube': {'player_client': ['tv_embedded', 'android']}}
-                })
-                return fallback_ytdl.extract_info(f"ytsearch:{webpage_url}", download=False)['entries'][0]
+                print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Using SoundCloud fallback...", flush=True)
+                sc_ytdl = get_soundcloud_ytdl_instance()
+                res = sc_ytdl.extract_info(f"scsearch:{title}", download=False)
+                if 'entries' in res and res['entries']:
+                    return res['entries'][0]
+                return res
 
         data = await loop.run_in_executor(None, _extract)
         

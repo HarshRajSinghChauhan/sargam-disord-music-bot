@@ -46,7 +46,7 @@ class Music(commands.Cog):
 
             try:
                 # Get fresh stream URL right before playing
-                source = await YTDLSource.get_stream_source(state.current['webpage_url'], loop=self.bot.loop)
+                source = await YTDLSource.get_stream_source(state.current, loop=self.bot.loop)
                 source.volume = state.volume
             except Exception as e:
                 print(f"Error extracting stream for {state.current['title']}: {e}")
