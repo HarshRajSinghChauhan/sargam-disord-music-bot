@@ -54,7 +54,12 @@ class Music(commands.Cog):
                 state.current = None
                 continue
 
-            state.voice_client.play(source, after=lambda e: self.bot.loop.call_soon_threadsafe(state.play_next_event.set))
+            def after_playing(error):
+                if error:
+                    print(f"Voice playback error: {error}")
+                self.bot.loop.call_soon_threadsafe(state.play_next_event.set)
+
+            state.voice_client.play(source, after=after_playing)
             
             await state.play_next_event.wait()
             

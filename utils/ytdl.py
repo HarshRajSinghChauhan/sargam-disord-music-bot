@@ -101,4 +101,13 @@ class YTDLSource(discord.PCMVolumeTransformer):
             data = data['entries'][0]
             
         filename = data['url']
-        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
+        
+        headers = data.get('http_headers', {})
+        user_agent = headers.get('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+        dynamic_ffmpeg_options = {
+            'options': '-vn',
+            'before_options': f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 10M -analyzeduration 10M -user_agent "{user_agent}"'
+        }
+        
+        return cls(discord.FFmpegPCMAudio(filename, **dynamic_ffmpeg_options), data=data)
