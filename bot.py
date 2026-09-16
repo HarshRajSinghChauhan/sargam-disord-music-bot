@@ -3,11 +3,26 @@ from discord.ext import commands
 import os
 from dotenv import load_dotenv
 import asyncio
+from aiohttp import web
 
 load_dotenv()
 
 TOKEN = os.getenv('DISCORD_TOKEN')
 TEST_GUILD_ID = os.getenv('TEST_GUILD_ID')
+PORT = int(os.getenv('PORT', 8080))
+
+async def handle_healthcheck(request):
+    return web.Response(text="Discord Music Bot is online and running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_healthcheck)
+    app.router.add_get('/health', handle_healthcheck)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    print(f"Health check web server running on port {PORT}")
 
 class MusicBot(commands.Bot):
     def __init__(self):
@@ -22,6 +37,9 @@ class MusicBot(commands.Bot):
         )
 
     async def setup_hook(self):
+        # Start health check web server in background
+        asyncio.create_task(start_web_server())
+
         # Load extensions
         await self.load_extension('cogs.music')
         print("Loaded extension: cogs.music")
@@ -47,3 +65,4 @@ if __name__ == '__main__':
         print("Error: DISCORD_TOKEN is not set. Please configure your .env file.")
     else:
         bot.run(TOKEN)
+
