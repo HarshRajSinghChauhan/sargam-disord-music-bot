@@ -125,6 +125,14 @@ class YTDLSource(discord.PCMVolumeTransformer):
     async def create_source(cls, ctx, search: str, *, loop=None):
         loop = loop or asyncio.get_event_loop()
         
+        # Strip YouTube Radio/Mix playlist parameters if a user pasted a single video URL with a Mix attached
+        if ("youtube.com/watch" in search or "youtu.be/" in search) and ("list=RD" in search or "list=UL" in search or "start_radio=" in search):
+            import urllib.parse as urlparse
+            parsed = urlparse.urlparse(search)
+            qd = urlparse.parse_qs(parsed.query)
+            if 'v' in qd:
+                search = f"https://www.youtube.com/watch?v={qd['v'][0]}"
+        
         def _extract():
             ytdl = get_ytdl_instance()
             try:
