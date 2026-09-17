@@ -85,6 +85,9 @@ def get_ytdl_instance():
         'extractor_args': {
             'youtube': {
                 'player_client': ['tv_embedded', 'web', 'mweb', 'android']
+            },
+            'youtubetab': {
+                'skip': ['authcheck']
             }
         }
     }
