@@ -3,9 +3,25 @@ import discord
 import yt_dlp
 import os
 import json
+import urllib.request
 
 # Suppress noise about console usage from errors
 yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
+
+def get_youtube_title_oembed(url: str):
+    """Fetch video title and author using YouTube's lightweight oEmbed endpoint (bypasses bot checks)."""
+    try:
+        oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
+        req = urllib.request.Request(
+            oembed_url, 
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            return data.get('title'), data.get('author_name')
+    except Exception as e:
+        print(f"[oEmbed Warning] Could not fetch oEmbed for {url}: {e}", flush=True)
+        return None, None
 
 def format_as_netscape_cookies(content):
     if not content:
@@ -84,7 +100,7 @@ def get_ytdl_instance():
         'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
         'extractor_args': {
             'youtube': {
-                'player_client': ['tv_embedded', 'web', 'mweb', 'android']
+                'player_client': ['ios', 'android', 'mweb', 'web']
             },
             'youtubetab': {
                 'skip': ['authcheck']
@@ -130,9 +146,35 @@ class YTDLSource(discord.PCMVolumeTransformer):
             try:
                 return ytdl.extract_info(search, download=False)
             except Exception as e:
-                print(f"[YTDL Warning] YouTube search failed for '{search}': {e}. Trying SoundCloud fallback...", flush=True)
+                query = search
+                title_from_oembed = None
+                author_from_oembed = None
+
+                # If search is a YouTube URL, resolve title and author via oEmbed
+                if ("youtube.com" in search or "youtu.be" in search) and search.startswith(("http://", "https://")):
+                    title_from_oembed, author_from_oembed = get_youtube_title_oembed(search)
+                    if title_from_oembed:
+                        query = f"{title_from_oembed} {author_from_oembed or ''}".strip()
+
+                print(f"[YTDL Warning] YouTube search failed for '{search}': {e}. Trying SoundCloud fallback with query: '{query}'...", flush=True)
                 sc_ytdl = get_soundcloud_ytdl_instance()
-                return sc_ytdl.extract_info(f"scsearch:{search}", download=False)
+                try:
+                    sc_data = sc_ytdl.extract_info(f"scsearch:{query}", download=False)
+                    if sc_data and sc_data.get('entries'):
+                        return sc_data
+                except Exception as sc_err:
+                    print(f"[SoundCloud Warning] SoundCloud search failed: {sc_err}", flush=True)
+
+                if title_from_oembed:
+                    return {
+                        'title': title_from_oembed,
+                        'webpage_url': search,
+                        'uploader': author_from_oembed or 'YouTube',
+                        'duration': 0,
+                        'id': None
+                    }
+
+                return {'entries': []}
 
         data = await loop.run_in_executor(None, _extract)
         
@@ -175,9 +217,13 @@ class YTDLSource(discord.PCMVolumeTransformer):
         data = await loop.run_in_executor(None, _extract)
         
         if 'entries' in data:
+            if not data['entries']:
+                raise Exception(f"No stream entries found for {title}")
             data = data['entries'][0]
             
-        filename = data['url']
+        filename = data.get('url')
+        if not filename:
+            raise Exception(f"Could not find stream URL for {title}")
         
         headers = data.get('http_headers', {})
         user_agent = headers.get('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
