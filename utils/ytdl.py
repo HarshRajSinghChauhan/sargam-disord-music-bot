@@ -117,7 +117,7 @@ def format_as_netscape_cookies(content):
 
 _cookies_written = False
 
-def get_ytdl_instance(noplaylist: bool = False):
+def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True):
     global _cookies_written
     cookies_path = 'cookies.txt'
     cookies_env = os.getenv('YOUTUBE_COOKIES')
@@ -153,7 +153,12 @@ def get_ytdl_instance(noplaylist: bool = False):
         }
     }
     
-    if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
+    # Optional proxy to bypass datacenter IP bans (e.g. on Render / AWS)
+    proxy = os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY')
+    if proxy:
+        options['proxy'] = proxy
+    
+    if use_cookies and os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
         options['cookiefile'] = cookies_path
 
     return yt_dlp.YoutubeDL(options)
@@ -189,10 +194,20 @@ class YTDLSource(discord.PCMVolumeTransformer):
         is_explicit_playlist = ('playlist?list=' in clean_search) or ('list=PL' in clean_search) or ('list=OLAK' in clean_search)
         
         def _extract():
-            ytdl = get_ytdl_instance(noplaylist=not is_explicit_playlist)
+            cookies_file_exists = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
+            ytdl = get_ytdl_instance(noplaylist=not is_explicit_playlist, use_cookies=True)
             try:
                 return ytdl.extract_info(clean_search, download=False)
             except Exception as e:
+                # If extraction with cookies failed, retry without cookies in case cookies are expired/flagged
+                if cookies_file_exists and ('player response' in str(e).lower() or 'sign in' in str(e).lower() or '403' in str(e).lower()):
+                    try:
+                        print("[YTDL Warning] Extraction with cookies failed. Retrying without cookies...", flush=True)
+                        ytdl_no_cookie = get_ytdl_instance(noplaylist=not is_explicit_playlist, use_cookies=False)
+                        return ytdl_no_cookie.extract_info(clean_search, download=False)
+                    except Exception as no_cookie_err:
+                        e = no_cookie_err
+
                 query = clean_search
                 title_from_oembed = None
                 author_from_oembed = None
@@ -205,7 +220,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
                 print(f"[YTDL Warning] YouTube extraction failed for '{clean_search}': {e}. Trying fallback search for: '{query}'...", flush=True)
                 
-                # 1. First fallback: YouTube search (useful if direct URL or tab had issues)
+                # 1. First fallback: YouTube search
                 if query != clean_search:
                     try:
                         yt_search_data = ytdl.extract_info(f"ytsearch1:{query}", download=False)
@@ -263,10 +278,20 @@ class YTDLSource(discord.PCMVolumeTransformer):
         
         def _extract():
             # Playing a single audio track - NEVER extract playlists or tabs
-            ytdl = get_ytdl_instance(noplaylist=True)
+            cookies_file_exists = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
+            ytdl = get_ytdl_instance(noplaylist=True, use_cookies=True)
             try:
                 return ytdl.extract_info(clean_url, download=False)
             except Exception as e:
+                # If extraction with cookies failed, retry without cookies
+                if cookies_file_exists and ('player response' in str(e).lower() or 'sign in' in str(e).lower() or '403' in str(e).lower()):
+                    try:
+                        print("[YTDL Warning] Stream extraction with cookies failed. Retrying without cookies...", flush=True)
+                        ytdl_no_cookie = get_ytdl_instance(noplaylist=True, use_cookies=False)
+                        return ytdl_no_cookie.extract_info(clean_url, download=False)
+                    except Exception as no_cookie_err:
+                        e = no_cookie_err
+
                 cleaned_title = clean_search_query(title)
                 print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Attempting search fallback with '{cleaned_title}'...", flush=True)
                 
