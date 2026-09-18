@@ -98,6 +98,7 @@ class AudioMixer(discord.AudioSource):
         self.overlays: List[OverlaySound] = []
         self.on_music_end: Optional[Callable] = None
         self._is_playing_mixer: bool = False
+        self._empty_music_frames: int = 0
 
     def is_opus(self) -> bool:
         return False
@@ -130,6 +131,7 @@ class AudioMixer(discord.AudioSource):
             self.music_source = source
             self.on_music_end = on_end
             self.music_paused = False
+            self._empty_music_frames = 0
 
     def stop_music(self):
         """Stops current music track and triggers on_end callback."""
@@ -230,19 +232,26 @@ class AudioMixer(discord.AudioSource):
                 try:
                     raw_music = self.music_source.read()
                     if raw_music:
+                        self._empty_music_frames = 0
                         effective_vol = self.music_volume * duck_factor
                         music_chunk = pcm_mul(raw_music, effective_vol)
                         if len(music_chunk) < self.FRAME_SIZE:
                             music_chunk = music_chunk + b'\x00' * (self.FRAME_SIZE - len(music_chunk))
                     else:
-                        # Music track ended naturally
-                        try:
-                            self.music_source.cleanup()
-                        except Exception:
-                            pass
-                        self.music_source = None
-                        music_callback = self.on_music_end
-                        self.on_music_end = None
+                        # Allow a grace period of 25 consecutive empty frames (~500ms) for stream buffering
+                        self._empty_music_frames += 1
+                        if self._empty_music_frames >= 25:
+                            # Music track truly ended
+                            try:
+                                self.music_source.cleanup()
+                            except Exception:
+                                pass
+                            self.music_source = None
+                            music_callback = self.on_music_end
+                            self.on_music_end = None
+                        else:
+                            # Output silence during temporary buffer gap
+                            music_chunk = b'\x00' * self.FRAME_SIZE
                 except Exception as e:
                     logger.error(f"Error reading music stream: {e}")
                     try:
