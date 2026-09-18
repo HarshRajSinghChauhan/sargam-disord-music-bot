@@ -40,9 +40,16 @@ class MusicBot(commands.Bot):
         # Start health check web server in background
         asyncio.create_task(start_web_server())
 
+        # Initialize database
+        from utils.database import db
+        await db.init_db()
+        print("Initialized SQLite database.")
+
         # Load extensions
         await self.load_extension('cogs.music')
         print("Loaded extension: cogs.music")
+        await self.load_extension('cogs.joinsound')
+        print("Loaded extension: cogs.joinsound")
 
         # Sync slash commands
         if TEST_GUILD_ID:

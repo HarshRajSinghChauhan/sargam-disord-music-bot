@@ -57,3 +57,11 @@ docker-compose down
 - `/shuffle`: Shuffle the queue.
 - `/volume [0-100]`: Adjust the bot's volume.
 - `/loop`: Toggle looping for the current track.
+
+### Custom Join Sound Commands
+- `/setjoinsound [sound] [user] [volume] [enabled]`: Assign a custom sound (MP3/WAV/OGG, max 10s) to play when you (or another member, if admin) join a voice channel.
+- `/removejoinsound [user]`: Remove the assigned join sound.
+- `/myjoinsound`: View your currently assigned join sound details.
+- `/joinsounds [page]`: View all configured join sounds in this server.
+- `/testjoinsound [user]`: Test and preview your join sound in your current voice channel.
+- `/joinsoundconfig [cooldown] [duck_volume] [auto_connect] [enabled]`: (Admin only) Configure server-specific join sound settings, anti-spam cooldown, and music ducking volume.

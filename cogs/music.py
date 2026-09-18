@@ -3,6 +3,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from utils.ytdl import YTDLSource
+from utils.mixer import AudioMixer
 import math
 
 class GuildState:
@@ -14,6 +15,8 @@ class GuildState:
         self.play_next_event = asyncio.Event()
         self.player_task = None
         self.volume = 0.5
+        self.mixer = AudioMixer()
+        self.mixer.music_volume = self.volume
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -47,7 +50,7 @@ class Music(commands.Cog):
             try:
                 # Get fresh stream URL right before playing
                 source = await YTDLSource.get_stream_source(state.current, loop=self.bot.loop)
-                source.volume = state.volume
+                state.mixer.music_volume = state.volume
             except Exception as e:
                 print(f"Error extracting stream for {state.current['title']}: {e}")
                 # Skip to next track
@@ -59,7 +62,13 @@ class Music(commands.Cog):
                     print(f"Voice playback error: {error}")
                 self.bot.loop.call_soon_threadsafe(state.play_next_event.set)
 
-            state.voice_client.play(source, after=after_playing)
+            state.mixer.set_music(source, on_end=after_playing)
+            
+            if state.voice_client and not state.voice_client.is_playing():
+                try:
+                    state.voice_client.play(state.mixer)
+                except discord.ClientException:
+                    pass
             
             await state.play_next_event.wait()
             
@@ -123,10 +132,9 @@ class Music(commands.Cog):
     @app_commands.command(name="skip", description="Skip the current song")
     async def skip(self, interaction: discord.Interaction):
         state = self.get_state(interaction.guild_id)
-        if state.voice_client and state.voice_client.is_playing():
-            state.voice_client.stop()
-            # If looping is enabled, we should probably break the loop on manual skip
-            state.loop = False 
+        if state.mixer.has_music():
+            state.loop = False
+            state.mixer.stop_music()
             await interaction.response.send_message("Skipped the current song.")
         else:
             await interaction.response.send_message("Nothing is currently playing.", ephemeral=True)
@@ -134,17 +142,24 @@ class Music(commands.Cog):
     @app_commands.command(name="pause", description="Pause the current song")
     async def pause(self, interaction: discord.Interaction):
         state = self.get_state(interaction.guild_id)
-        if state.voice_client and state.voice_client.is_playing():
-            state.voice_client.pause()
+        if state.mixer.has_music() and not state.mixer.is_music_paused():
+            state.mixer.pause_music()
             await interaction.response.send_message("Paused playback.")
+        elif state.mixer.is_music_paused():
+            await interaction.response.send_message("Audio is already paused.", ephemeral=True)
         else:
             await interaction.response.send_message("Nothing is currently playing.", ephemeral=True)
 
     @app_commands.command(name="resume", description="Resume the paused song")
     async def resume(self, interaction: discord.Interaction):
         state = self.get_state(interaction.guild_id)
-        if state.voice_client and state.voice_client.is_paused():
-            state.voice_client.resume()
+        if state.mixer.is_music_paused():
+            state.mixer.resume_music()
+            if state.voice_client and not state.voice_client.is_playing():
+                try:
+                    state.voice_client.play(state.mixer)
+                except discord.ClientException:
+                    pass
             await interaction.response.send_message("Resumed playback.")
         else:
             await interaction.response.send_message("Audio is not paused.", ephemeral=True)
@@ -154,6 +169,7 @@ class Music(commands.Cog):
         state = self.get_state(interaction.guild_id)
         state.queue.clear()
         state.loop = False
+        state.mixer.stop_all()
         if state.voice_client:
             state.voice_client.stop()
             await state.voice_client.disconnect()
@@ -195,14 +211,15 @@ class Music(commands.Cog):
     @app_commands.command(name="nowplaying", description="Show currently playing song")
     async def nowplaying(self, interaction: discord.Interaction):
         state = self.get_state(interaction.guild_id)
-        if state.current:
+        if state.current and state.mixer.has_music():
             embed = discord.Embed(title="Now Playing", description=f"[{state.current['title']}]({state.current['webpage_url']})", color=discord.Color.green())
             if state.current.get('uploader'):
                 embed.add_field(name="Channel", value=state.current['uploader'])
             if state.current.get('duration'):
                 mins, secs = divmod(state.current['duration'], 60)
                 embed.add_field(name="Duration", value=f"{mins}:{secs:02d}")
-            embed.set_footer(text=f"Loop: {'Enabled' if state.loop else 'Disabled'}")
+            status_text = "Paused" if state.mixer.is_music_paused() else "Playing"
+            embed.set_footer(text=f"Status: {status_text} | Loop: {'Enabled' if state.loop else 'Disabled'}")
             await interaction.response.send_message(embed=embed)
         else:
             await interaction.response.send_message("Nothing is currently playing.")
@@ -234,10 +251,7 @@ class Music(commands.Cog):
         state = self.get_state(interaction.guild_id)
         level = max(0, min(level, 100))
         state.volume = level / 100.0
-        
-        if state.voice_client and state.voice_client.source:
-            state.voice_client.source.volume = state.volume
-            
+        state.mixer.music_volume = state.volume
         await interaction.response.send_message(f"Volume set to {level}%")
 
     @app_commands.command(name="loop", description="Toggle looping for the current song")

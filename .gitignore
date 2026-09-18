@@ -25,3 +25,7 @@ venv.bak/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Persistent storage & databases
+data/
+*.db
