@@ -147,9 +147,6 @@ def get_ytdl_instance(noplaylist: bool = False):
         'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
         'js_runtimes': {'node': {}, 'deno': {}},
         'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'android', 'mweb', 'web']
-            },
             'youtubetab': {
                 'skip': ['authcheck']
             }
@@ -204,8 +201,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 if ("youtube.com" in clean_search or "youtu.be" in clean_search) and clean_search.startswith(("http://", "https://")):
                     title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
                     if title_from_oembed:
-                        cleaned = clean_search_query(title_from_oembed)
-                        query = f"{cleaned} {author_from_oembed or ''}".strip()
+                        query = clean_search_query(title_from_oembed)
 
                 print(f"[YTDL Warning] YouTube extraction failed for '{clean_search}': {e}. Trying fallback search for: '{query}'...", flush=True)
                 
