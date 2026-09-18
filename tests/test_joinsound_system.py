@@ -163,49 +163,56 @@ class TestDatabase(unittest.IsolatedAsyncioTestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     async def test_join_sound_crud_and_server_isolation(self):
+        fake_audio_a = b"RIFF....WAVEfmt ....dataFAKE_AUDIO_A"
+        fake_audio_b = b"RIFF....WAVEfmt ....dataFAKE_AUDIO_B"
+        fake_audio_a2 = b"RIFF....WAVEfmt ....dataFAKE_AUDIO_A2"
+
         # 1. Add sound for User 1 in Guild A
-        old = await self.db.set_join_sound(
+        path_a = await self.db.set_join_sound(
             guild_id=101,
             user_id=201,
-            sound_path="/sounds/101/harsh_a.mp3",
             sound_name="harsh_a.mp3",
+            audio_data=fake_audio_a,
             volume=60,
             enabled=True
         )
-        self.assertIsNone(old)
+        self.assertTrue(os.path.exists(path_a))
 
         # 2. Add sound for User 1 in Guild B (Different server)
-        await self.db.set_join_sound(
+        path_b = await self.db.set_join_sound(
             guild_id=102,
             user_id=201,
-            sound_path="/sounds/102/harsh_b.mp3",
             sound_name="harsh_b.mp3",
+            audio_data=fake_audio_b,
             volume=80,
             enabled=True
         )
+        self.assertTrue(os.path.exists(path_b))
 
         # 3. Retrieve User 1 in Guild A
         sound_a = await self.db.get_join_sound(101, 201)
         self.assertIsNotNone(sound_a)
         self.assertEqual(sound_a['sound_name'], "harsh_a.mp3")
         self.assertEqual(sound_a['volume'], 60)
+        self.assertTrue(os.path.exists(sound_a['sound_path']))
 
         # 4. Retrieve User 1 in Guild B
         sound_b = await self.db.get_join_sound(102, 201)
         self.assertIsNotNone(sound_b)
         self.assertEqual(sound_b['sound_name'], "harsh_b.mp3")
         self.assertEqual(sound_b['volume'], 80)
+        self.assertTrue(os.path.exists(sound_b['sound_path']))
 
         # 5. Update sound in Guild A
-        old = await self.db.set_join_sound(
+        path_a2 = await self.db.set_join_sound(
             guild_id=101,
             user_id=201,
-            sound_path="/sounds/101/harsh_a_v2.mp3",
             sound_name="harsh_a_v2.mp3",
+            audio_data=fake_audio_a2,
             volume=70,
             enabled=True
         )
-        self.assertEqual(old, "/sounds/101/harsh_a.mp3")
+        self.assertTrue(os.path.exists(path_a2))
 
         # 6. List sounds for Guild A
         sounds = await self.db.list_guild_join_sounds(101)
@@ -214,10 +221,11 @@ class TestDatabase(unittest.IsolatedAsyncioTestCase):
 
         # 7. Remove sound
         removed = await self.db.remove_join_sound(101, 201)
-        self.assertEqual(removed, "/sounds/101/harsh_a_v2.mp3")
+        self.assertTrue(removed)
 
         # Guild A should now be empty, but Guild B untouched
         self.assertIsNone(await self.db.get_join_sound(101, 201))
+        self.assertIsNotNone(await self.db.get_join_sound(102, 201))
         self.assertIsNotNone(await self.db.get_join_sound(102, 201))
 
     async def test_guild_settings(self):

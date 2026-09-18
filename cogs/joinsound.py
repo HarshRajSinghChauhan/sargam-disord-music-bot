@@ -261,8 +261,10 @@ class JoinSound(commands.Cog):
         target_file_path = os.path.join(guild_dir, f"{target_user.id}_{int(time.time())}{ext}")
 
         try:
-            # Download attachment
-            await sound.save(target_file_path)
+            # Download attachment bytes
+            audio_bytes = await sound.read()
+            with open(target_file_path, 'wb') as f:
+                f.write(audio_bytes)
 
             # Validate audio format & duration
             is_valid, error_msg, duration = validate_audio_file(target_file_path, max_duration=MAX_DURATION_SECONDS)
@@ -272,22 +274,15 @@ class JoinSound(commands.Cog):
                 await interaction.followup.send(f"❌ {error_msg}")
                 return
 
-            # Store in database
-            old_path = await db.set_join_sound(
+            # Store in database (with binary audio_data for persistent cloud/Neon storage)
+            await db.set_join_sound(
                 guild_id=interaction.guild_id,
                 user_id=target_user.id,
-                sound_path=target_file_path,
                 sound_name=sound.filename,
+                audio_data=audio_bytes,
                 volume=volume,
                 enabled=enabled
             )
-
-            # Cleanup previous sound file if replacing
-            if old_path and os.path.exists(old_path) and os.path.abspath(old_path) != os.path.abspath(target_file_path):
-                try:
-                    os.remove(old_path)
-                except Exception as e:
-                    logger.warning(f"Could not remove old sound file {old_path}: {e}")
 
             # Respond with UX format matching requirements
             response_text = (
@@ -323,18 +318,11 @@ class JoinSound(commands.Cog):
                 )
                 return
 
-        old_path = await db.remove_join_sound(interaction.guild_id, target_user.id)
-        if not old_path:
+        removed = await db.remove_join_sound(interaction.guild_id, target_user.id)
+        if not removed:
             msg = "ℹ️ No custom join sound is configured for you." if target_user.id == interaction.user.id else f"ℹ️ No custom join sound is configured for **{target_user.display_name}**."
             await interaction.response.send_message(msg, ephemeral=True)
             return
-
-        # Delete sound file from disk
-        if os.path.exists(old_path):
-            try:
-                os.remove(old_path)
-            except Exception as e:
-                logger.warning(f"Failed to delete {old_path}: {e}")
 
         await interaction.response.send_message(f"✅ Join sound removed for **{target_user.display_name}**.")
 
