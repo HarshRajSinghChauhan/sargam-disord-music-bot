@@ -109,6 +109,117 @@ def format_as_netscape_cookies(content):
             if name and value:
                 lines.append(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}")
                 
+import asyncio
+import discord
+import yt_dlp
+import os
+import json
+import re
+import urllib.request
+import urllib.parse as urlparse
+
+# Suppress noise about console usage from errors
+yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
+
+def clean_youtube_url(url: str) -> str:
+    """Strip dynamic radio/mix/user playlist parameters if a user pasted a single video URL with a Mix attached."""
+    if not isinstance(url, str):
+        return url
+    if not ('youtube.com' in url or 'youtu.be' in url):
+        return url
+
+    try:
+        parsed = urlparse.urlparse(url)
+        qs = urlparse.parse_qs(parsed.query, keep_blank_values=True)
+        
+        video_id = qs.get('v', [None])[0]
+        list_id = qs.get('list', [None])[0]
+        
+        # If it's a youtu.be short URL
+        if not video_id and parsed.netloc in ('youtu.be', 'www.youtu.be'):
+            video_id = parsed.path.lstrip('/')
+            
+        if video_id:
+            # RD... = Radio mix, UL... = User uploads mix, LL = Liked, WL = Watch Later
+            if (list_id and list_id.startswith(('RD', 'UL', 'LL', 'WL'))) or 'start_radio' in qs:
+                return f"https://www.youtube.com/watch?v={video_id}"
+    except Exception:
+        pass
+    return url
+
+def clean_search_query(query: str) -> str:
+    """Clean video titles for better search matching on fallback extractors."""
+    if not query:
+        return ""
+    # Remove bracketed/parenthesized video meta like (Official Video), [Lyrics], (Visualizer), etc.
+    cleaned = re.sub(r'[\(\[][^\)\]]*(?:official|lyric|video|audio|visualizer|4k|hd|remix|version|prod|full song)[^\)\]]*[\)\]]', '', query, flags=re.IGNORECASE)
+    # Remove pipes and trailing channel names (e.g., "| Lyrical BAM Hindi")
+    if '|' in cleaned:
+        cleaned = cleaned.split('|')[0]
+    cleaned = ' '.join(cleaned.split()).strip()
+    return cleaned if cleaned else query
+
+def get_youtube_title_oembed(url: str):
+    """Fetch video title and author using YouTube's lightweight oEmbed endpoint (bypasses bot checks)."""
+    try:
+        oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(url, safe=':/?=&')}&format=json"
+        req = urllib.request.Request(
+            oembed_url, 
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            return data.get('title'), data.get('author_name')
+    except Exception as e:
+        print(f"[oEmbed Warning] Could not fetch oEmbed for {url}: {e}", flush=True)
+        return None, None
+
+def format_as_netscape_cookies(content):
+    if not content:
+        return ""
+        
+    content = content.replace('\\n', '\n').strip()
+    
+    # 1. Already Netscape format (contains tabs or # Netscape header)
+    if '# Netscape' in content or '\t' in content:
+        if not content.startswith('# Netscape'):
+            content = '# Netscape HTTP Cookie File\n' + content
+        return content
+        
+    # 2. JSON format (e.g., exported from EditThisCookie / Cookie-Editor)
+    if content.startswith('[') and content.endswith(']'):
+        try:
+            data = json.loads(content)
+            lines = ['# Netscape HTTP Cookie File']
+            for item in data:
+                domain = item.get('domain', '.youtube.com')
+                flag = 'TRUE' if domain.startswith('.') else 'FALSE'
+                path = item.get('path', '/')
+                secure = 'TRUE' if item.get('secure') else 'FALSE'
+                expiration = str(int(item.get('expirationDate', 2147483647)))
+                name = item.get('name', '')
+                value = item.get('value', '')
+                if name:
+                    lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expiration}\t{name}\t{value}")
+            print(f"Parsed JSON cookies into {len(lines)-1} Netscape entries", flush=True)
+            return '\n'.join(lines)
+        except Exception as e:
+            print(f"Error parsing JSON cookies: {e}", flush=True)
+
+    # 3. Header format (e.g., "SID=xxx; HSID=yyy; VISITOR_INFO1_LIVE=zzz")
+    lines = ['# Netscape HTTP Cookie File']
+    if content.lower().startswith('cookie:'):
+        content = content[7:].strip()
+    
+    pairs = content.split(';')
+    for pair in pairs:
+        if '=' in pair:
+            name, value = pair.split('=', 1)
+            name = name.strip()
+            value = value.strip()
+            if name and value:
+                lines.append(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}")
+                
     if len(lines) > 1:
         print(f"Parsed header cookies into {len(lines)-1} Netscape entries", flush=True)
         return '\n'.join(lines)
@@ -117,7 +228,7 @@ def format_as_netscape_cookies(content):
 
 _cookies_written = False
 
-def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_proxy: bool = True):
+def ensure_cookies_written():
     global _cookies_written
     cookies_path = 'cookies.txt'
     cookies_env = os.getenv('YOUTUBE_COOKIES')
@@ -131,7 +242,17 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
             _cookies_written = True
         except Exception as e:
             print(f"[YTDL] Error writing cookies.txt: {e}", flush=True)
-            
+
+# Write cookies immediately on startup if available
+ensure_cookies_written()
+
+def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_proxy: bool = True, player_clients: list = None):
+    ensure_cookies_written()
+    cookies_path = 'cookies.txt'
+    
+    # Default to android/ios mobile clients which bypass YouTube's datacenter IP bot detection
+    clients = player_clients or ['android', 'ios']
+    
     options = {
         'format': 'bestaudio/best/bestaudio*/best*',
         'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -144,16 +265,19 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
         'quiet': True,
         'no_warnings': True,
         'default_search': 'auto',
-        'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
+        'source_address': '0.0.0.0',
         'js_runtimes': {'node': {}, 'deno': {}},
         'extractor_args': {
             'youtubetab': {
                 'skip': ['authcheck']
+            },
+            'youtube': {
+                'player_client': clients
             }
         }
     }
     
-    # Optional proxy to bypass datacenter IP bans (supports single proxy or comma-separated list for auto-rotation)
+    # Optional proxy support (supports single proxy or comma-separated list for auto-rotation)
     if use_proxy:
         proxy_env = os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY')
         if proxy_env:
@@ -169,15 +293,23 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
     return yt_dlp.YoutubeDL(options)
 
 def extract_youtube_info(target: str, noplaylist: bool = False):
+    ensure_cookies_written()
     cookies_available = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
     proxy_available = bool(os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY'))
 
     attempts = []
+    # Primary attempts using Android/iOS clients (effective on datacenter IPs like Render)
     if cookies_available:
-        attempts.append({'use_cookies': True, 'use_proxy': True, 'desc': 'with cookies'})
-    attempts.append({'use_cookies': False, 'use_proxy': True, 'desc': 'without cookies (visionos)'})
+        if proxy_available:
+            attempts.append({'use_cookies': True, 'use_proxy': True, 'clients': ['android', 'ios'], 'desc': 'android client with cookies & proxy'})
+        attempts.append({'use_cookies': True, 'use_proxy': False, 'clients': ['android', 'ios'], 'desc': 'android client with cookies direct IP'})
     if proxy_available:
-        attempts.append({'use_cookies': False, 'use_proxy': False, 'desc': 'without cookies & direct IP'})
+        attempts.append({'use_cookies': False, 'use_proxy': True, 'clients': ['android', 'ios'], 'desc': 'android client without cookies & proxy'})
+    attempts.append({'use_cookies': False, 'use_proxy': False, 'clients': ['android', 'ios'], 'desc': 'android client without cookies direct IP'})
+
+    # Fallback clients
+    attempts.append({'use_cookies': False, 'use_proxy': False, 'clients': ['tv_embedded', 'android_creator'], 'desc': 'tv_embedded/android_creator fallback'})
+    attempts.append({'use_cookies': False, 'use_proxy': False, 'clients': None, 'desc': 'default yt-dlp clients'})
 
     last_err = None
     for attempt in attempts:
@@ -185,14 +317,15 @@ def extract_youtube_info(target: str, noplaylist: bool = False):
             ydl = get_ytdl_instance(
                 noplaylist=noplaylist,
                 use_cookies=attempt['use_cookies'],
-                use_proxy=attempt['use_proxy']
+                use_proxy=attempt['use_proxy'],
+                player_clients=attempt.get('clients')
             )
             data = ydl.extract_info(target, download=False)
             if data:
                 return data
         except Exception as err:
             last_err = err
-            print(f"[YTDL] Attempt {attempt['desc']} failed for '{target}': {err}", flush=True)
+            print(f"[YTDL] Attempt '{attempt['desc']}' failed for '{target}': {err}", flush=True)
 
     raise last_err or Exception(f"Failed to extract YouTube info for {target}")
 
@@ -207,7 +340,7 @@ def get_soundcloud_ytdl_instance():
         'default_search': 'scsearch'
     })
 
-def is_valid_soundcloud_entry(entry):
+def is_valid_soundcloud_entry(entry, original_query: str = ""):
     if not isinstance(entry, dict):
         return False
     url = str(entry.get('url', '')).lower()
@@ -216,136 +349,18 @@ def is_valid_soundcloud_entry(entry):
     duration = entry.get('duration')
     if duration is not None and duration <= 30:
         return False
+
+    title = str(entry.get('title', '')).lower()
+    orig_q = (original_query or "").lower()
+
+    # Filter out common modified/amateur tracks (slowed, reverb, raw acoustic cover)
+    # unless the user specifically searched for those terms
+    unwanted_keywords = ['slowed', 'reverb', 'slow+reverb', 'slowed+reverb', 'acoustic cover', 'guitar cover', 'unplugged cover', 'raw']
+    for kw in unwanted_keywords:
+        if kw in title and kw not in orig_q:
+            return False
+
     return True
-
-
-# Public Invidious instances — used as fallback when YouTube blocks Render's datacenter IP
-# These are verified to have the API enabled (api=True at https://api.invidious.io/instances.json)
-_INVIDIOUS_INSTANCES = [
-    'https://invidious.f5.si',
-]
-
-_invidious_discovered = False
-
-def _discover_invidious_instances():
-    """Dynamically fetch the current list of API-enabled Invidious instances."""
-    global _invidious_discovered
-    if _invidious_discovered:
-        return
-    try:
-        req = urllib.request.Request(
-            'https://api.invidious.io/instances.json?sort_by=health',
-            headers={'User-Agent': 'Mozilla/5.0 (compatible; SargamBot/1.0)'}
-        )
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            instances = json.loads(resp.read())
-        new_list = [
-            data['uri'] for name, data in instances
-            if data.get('api') is True and data.get('type') == 'https' and data.get('uri')
-        ]
-        if new_list:
-            _INVIDIOUS_INSTANCES.clear()
-            _INVIDIOUS_INSTANCES.extend(new_list)
-            print(f"[Invidious] Discovered {len(new_list)} API instances", flush=True)
-        _invidious_discovered = True
-    except Exception as e:
-        print(f"[Invidious] Instance discovery failed (using defaults): {e}", flush=True)
-        _invidious_discovered = True  # Don't retry continuously
-
-
-def get_invidious_stream(video_id: str):
-    """
-    Fetch the best audio stream URL for a YouTube video_id via the Invidious API.
-    Invidious runs its own servers — not blocked by Render's IP.
-    Returns a dict with keys: title, url, webpage_url, uploader, duration, http_headers.
-    """
-    import random
-    _discover_invidious_instances()
-    instances = _INVIDIOUS_INSTANCES[:]
-    random.shuffle(instances)
-
-    for base_url in instances:
-        try:
-            api_url = f"{base_url}/api/v1/videos/{video_id}?fields=title,author,lengthSeconds,adaptiveFormats,formatStreams"
-            req = urllib.request.Request(api_url, headers={
-                'User-Agent': 'Mozilla/5.0 (compatible; SargamBot/1.0)',
-                'Accept': 'application/json'
-            })
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                data = json.loads(resp.read().decode('utf-8'))
-
-            # Pick best audio-only format (prefer opus/webm, fallback to mp4a/m4a)
-            best_audio = None
-            best_bitrate = 0
-            for fmt in data.get('adaptiveFormats', []):
-                mime = fmt.get('type', '')
-                if not ('audio' in mime):
-                    continue
-                bitrate = int(fmt.get('bitrate', 0))
-                if bitrate > best_bitrate:
-                    best_audio = fmt
-                    best_bitrate = bitrate
-
-            # Final fallback: pick from formatStreams if adaptiveFormats had nothing
-            if not best_audio:
-                for fmt in data.get('formatStreams', []):
-                    mime = fmt.get('type', '')
-                    if 'audio' in mime or 'mp4' in mime:
-                        best_audio = fmt
-                        break
-
-            if not best_audio or not best_audio.get('url'):
-                continue
-
-            stream_url = best_audio['url']
-            # If Invidious returns a relative URL, prefix the instance base
-            if stream_url.startswith('/'):
-                stream_url = base_url + stream_url
-
-            print(f"[Invidious] Got stream for {video_id} via {base_url}", flush=True)
-            return {
-                'title': data.get('title', ''),
-                'url': stream_url,
-                'webpage_url': f'https://www.youtube.com/watch?v={video_id}',
-                'uploader': data.get('author', ''),
-                'duration': int(data.get('lengthSeconds', 0)),
-                'http_headers': {'User-Agent': 'Mozilla/5.0'},
-                'extractor': 'invidious',
-            }
-        except Exception as e:
-            print(f"[Invidious] {base_url} failed for {video_id}: {e}", flush=True)
-
-    return None
-
-
-def search_invidious(query: str, max_results: int = 1):
-    """
-    Search YouTube videos via Invidious API (bypasses Render's blocked IP).
-    Returns a list of dicts with videoId, title, author, lengthSeconds.
-    """
-    import random
-    _discover_invidious_instances()
-    instances = _INVIDIOUS_INSTANCES[:]
-    random.shuffle(instances)
-
-    encoded_q = urllib.parse.quote(query)
-    for base_url in instances:
-        try:
-            api_url = f"{base_url}/api/v1/search?q={encoded_q}&type=video&fields=videoId,title,author,lengthSeconds&page=1"
-            req = urllib.request.Request(api_url, headers={
-                'User-Agent': 'Mozilla/5.0 (compatible; SargamBot/1.0)',
-                'Accept': 'application/json'
-            })
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                results = json.loads(resp.read().decode('utf-8'))
-
-            if results and isinstance(results, list):
-                print(f"[Invidious] Search '{query}' via {base_url}: {len(results)} results", flush=True)
-                return results[:max_results]
-        except Exception as e:
-            print(f"[Invidious] Search via {base_url} failed: {e}", flush=True)
-
-    return []
 
 
 ffmpeg_options = {
@@ -358,7 +373,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         super().__init__(source, volume)
         self.data = data
         self.title = data.get('title')
-        self.url = data.get('url') # This might be the stream URL or original URL
+        self.url = data.get('url') # Stream URL or original URL
         self.webpage_url = data.get('webpage_url')
         self.uploader = data.get('uploader')
         self.duration = data.get('duration')
@@ -383,25 +398,22 @@ class YTDLSource(discord.PCMVolumeTransformer):
                     if title_from_oembed:
                         query = clean_search_query(title_from_oembed)
 
-                print(f"[YTDL Warning] YouTube extraction failed for '{clean_search}': {e}. Trying fallback search for: '{query}'...", flush=True)
+                print(f"[YTDL Warning] Direct YouTube extraction failed for '{clean_search}': {e}. Trying YouTube search for: '{query}'...", flush=True)
 
-                # 1. Invidious fallback (bypasses datacenter IP block)
-                inv_results = search_invidious(query, max_results=1)
-                if inv_results:
-                    vid_id = inv_results[0].get('videoId')
-                    if vid_id:
-                        inv_data = get_invidious_stream(vid_id)
-                        if inv_data:
-                            return {'entries': [inv_data]}
+                # 1. First fallback: YouTube search (using Android mobile client)
+                try:
+                    yt_search_data = extract_youtube_info(f"ytsearch1:{query}", noplaylist=True)
+                    if yt_search_data and yt_search_data.get('entries'):
+                        return yt_search_data
+                except Exception as yt_err:
+                    print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
 
-                # 2. SoundCloud search (last resort)
+                # 2. Second fallback: SoundCloud search (strict filter to prevent slowed/covers)
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
                     sc_data = sc_ytdl.extract_info(f"scsearch5:{query}", download=False)
                     if sc_data and sc_data.get('entries'):
-                        valid_entries = [e for e in sc_data['entries'] if is_valid_soundcloud_entry(e)]
-                        if not valid_entries:
-                            valid_entries = [e for e in sc_data['entries'] if e and (e.get('url') or e.get('webpage_url'))]
+                        valid_entries = [e for e in sc_data['entries'] if is_valid_soundcloud_entry(e, query)]
                         if valid_entries:
                             sc_data['entries'] = valid_entries
                             return sc_data
@@ -447,15 +459,12 @@ class YTDLSource(discord.PCMVolumeTransformer):
         clean_url = clean_youtube_url(webpage_url) if isinstance(webpage_url, str) else webpage_url
         
         def _extract():
-            # Playing a single audio track - NEVER extract playlists or tabs
-            cookies_file_exists = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
-
             # If the URL is already a direct SoundCloud URL, use the SoundCloud extractor directly
             if isinstance(clean_url, str) and 'soundcloud.com' in clean_url:
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
                     res = sc_ytdl.extract_info(clean_url, download=False)
-                    if res and is_valid_soundcloud_entry(res):
+                    if res and is_valid_soundcloud_entry(res, title):
                         return res
                     if res and res.get('url'):
                         return res
@@ -466,48 +475,25 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 return extract_youtube_info(clean_url, noplaylist=True)
             except Exception as e:
                 cleaned_title = clean_search_query(title)
-                print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Attempting fallback...", flush=True)
+                print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Attempting YouTube search fallback with '{cleaned_title}'...", flush=True)
 
-                # 1. Try Invidious (bypasses datacenter IP block — uses public YouTube frontend)
-                # Extract video_id from YouTube URL if possible
-                yt_video_id = None
-                if isinstance(clean_url, str) and ('youtube.com' in clean_url or 'youtu.be' in clean_url):
-                    try:
-                        parsed_yt = urlparse.urlparse(clean_url)
-                        yt_video_id = urlparse.parse_qs(parsed_yt.query).get('v', [None])[0]
-                        if not yt_video_id and parsed_yt.netloc in ('youtu.be', 'www.youtu.be'):
-                            yt_video_id = parsed_yt.path.lstrip('/')
-                    except Exception:
-                        pass
+                # 1. Try YouTube search fallback (with Android mobile client)
+                try:
+                    yt_res = extract_youtube_info(f"ytsearch1:{cleaned_title}", noplaylist=True)
+                    if 'entries' in yt_res and yt_res['entries']:
+                        return yt_res['entries'][0]
+                except Exception as yt_err:
+                    print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
 
-                if yt_video_id:
-                    inv_data = get_invidious_stream(yt_video_id)
-                    if inv_data:
-                        return inv_data
-                else:
-                    # Non-URL query — search Invidious then get stream
-                    inv_results = search_invidious(cleaned_title, max_results=1)
-                    if inv_results:
-                        vid_id = inv_results[0].get('videoId')
-                        if vid_id:
-                            inv_data = get_invidious_stream(vid_id)
-                            if inv_data:
-                                return inv_data
-
-                # 2. Fallback to SoundCloud (last resort)
+                # 2. Fallback to SoundCloud (strict filter against slowed/covers)
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
                     res = sc_ytdl.extract_info(f"scsearch5:{cleaned_title}", download=False)
                     if res and 'entries' in res and res['entries']:
-                        valid_entries = [e for e in res['entries'] if is_valid_soundcloud_entry(e)]
+                        valid_entries = [e for e in res['entries'] if is_valid_soundcloud_entry(e, cleaned_title)]
                         if valid_entries:
                             return valid_entries[0]
-                        for entry in res['entries']:
-                            if entry and entry.get('url'):
-                                return entry
-                    if res and is_valid_soundcloud_entry(res):
-                        return res
-                    if res and res.get('url'):
+                    if res and is_valid_soundcloud_entry(res, cleaned_title):
                         return res
                 except Exception as sc_err:
                     print(f"[SoundCloud Warning] SoundCloud search failed: {sc_err}", flush=True)
