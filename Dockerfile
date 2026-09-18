@@ -2,9 +2,9 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1
 
-# Install ffmpeg and other necessary system packages
+# Install ffmpeg, nodejs (JS runtime for yt-dlp) and other necessary system packages
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg curl && \
+    apt-get install -y --no-install-recommends ffmpeg curl nodejs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

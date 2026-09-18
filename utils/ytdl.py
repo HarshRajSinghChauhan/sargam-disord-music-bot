@@ -3,15 +3,55 @@ import discord
 import yt_dlp
 import os
 import json
+import re
 import urllib.request
+import urllib.parse as urlparse
 
 # Suppress noise about console usage from errors
 yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
 
+def clean_youtube_url(url: str) -> str:
+    """Strip dynamic radio/mix/user playlist parameters if a user pasted a single video URL with a Mix attached."""
+    if not isinstance(url, str):
+        return url
+    if not ('youtube.com' in url or 'youtu.be' in url):
+        return url
+
+    try:
+        parsed = urlparse.urlparse(url)
+        qs = urlparse.parse_qs(parsed.query, keep_blank_values=True)
+        
+        video_id = qs.get('v', [None])[0]
+        list_id = qs.get('list', [None])[0]
+        
+        # If it's a youtu.be short URL
+        if not video_id and parsed.netloc in ('youtu.be', 'www.youtu.be'):
+            video_id = parsed.path.lstrip('/')
+            
+        if video_id:
+            # RD... = Radio mix, UL... = User uploads mix, LL = Liked, WL = Watch Later
+            if (list_id and list_id.startswith(('RD', 'UL', 'LL', 'WL'))) or 'start_radio' in qs:
+                return f"https://www.youtube.com/watch?v={video_id}"
+    except Exception:
+        pass
+    return url
+
+def clean_search_query(query: str) -> str:
+    """Clean video titles for better search matching on fallback extractors."""
+    if not query:
+        return ""
+    # Remove bracketed/parenthesized video meta like (Official Video), [Lyrics], (Visualizer), etc.
+    cleaned = re.sub(r'[\(\[][^\)\]]*(?:official|lyric|video|audio|visualizer|4k|hd|remix|version|prod|full song)[^\)\]]*[\)\]]', '', query, flags=re.IGNORECASE)
+    # Remove pipes and trailing channel names (e.g., "| Lyrical BAM Hindi")
+    if '|' in cleaned:
+        cleaned = cleaned.split('|')[0]
+    cleaned = ' '.join(cleaned.split()).strip()
+    return cleaned if cleaned else query
+
 def get_youtube_title_oembed(url: str):
     """Fetch video title and author using YouTube's lightweight oEmbed endpoint (bypasses bot checks)."""
     try:
-        oembed_url = f"https://www.youtube.com/oembed?url={url}&format=json"
+        oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(url, safe=':/?=&')}&format=json"
         req = urllib.request.Request(
             oembed_url, 
             headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
@@ -75,22 +115,29 @@ def format_as_netscape_cookies(content):
         
     return content
 
-def get_ytdl_instance():
+_cookies_written = False
+
+def get_ytdl_instance(noplaylist: bool = False):
+    global _cookies_written
     cookies_path = 'cookies.txt'
     cookies_env = os.getenv('YOUTUBE_COOKIES')
     
-    if cookies_env:
+    if cookies_env and not _cookies_written:
         cookies_content = format_as_netscape_cookies(cookies_env)
-        with open(cookies_path, 'w', encoding='utf-8') as f:
-            f.write(cookies_content)
-        print(f"[YTDL] Written cookies.txt (size: {len(cookies_content)} bytes)", flush=True)
+        try:
+            with open(cookies_path, 'w', encoding='utf-8') as f:
+                f.write(cookies_content)
+            print(f"[YTDL] Written cookies.txt (size: {len(cookies_content)} bytes)", flush=True)
+            _cookies_written = True
+        except Exception as e:
+            print(f"[YTDL] Error writing cookies.txt: {e}", flush=True)
             
     options = {
         'format': 'bestaudio/best/bestaudio*/best*',
         'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
         'restrictfilenames': True,
-        'noplaylist': False, # We want to handle playlists
-        'extract_flat': 'in_playlist', # For playlists, extract info quickly without downloading
+        'noplaylist': noplaylist,
+        'extract_flat': 'in_playlist' if not noplaylist else False,
         'nocheckcertificate': True,
         'ignoreerrors': False,
         'logtostderr': False,
@@ -98,6 +145,7 @@ def get_ytdl_instance():
         'no_warnings': True,
         'default_search': 'auto',
         'source_address': '0.0.0.0',  # bind to ipv4 since ipv6 addresses cause issues sometimes
+        'js_runtimes': {'node': {}, 'deno': {}},
         'extractor_args': {
             'youtube': {
                 'player_client': ['ios', 'android', 'mweb', 'web']
@@ -140,23 +188,37 @@ class YTDLSource(discord.PCMVolumeTransformer):
     @classmethod
     async def create_source(cls, ctx, search: str, *, loop=None):
         loop = loop or asyncio.get_event_loop()
+        clean_search = clean_youtube_url(search.strip())
+        is_explicit_playlist = ('playlist?list=' in clean_search) or ('list=PL' in clean_search) or ('list=OLAK' in clean_search)
         
         def _extract():
-            ytdl = get_ytdl_instance()
+            ytdl = get_ytdl_instance(noplaylist=not is_explicit_playlist)
             try:
-                return ytdl.extract_info(search, download=False)
+                return ytdl.extract_info(clean_search, download=False)
             except Exception as e:
-                query = search
+                query = clean_search
                 title_from_oembed = None
                 author_from_oembed = None
 
                 # If search is a YouTube URL, resolve title and author via oEmbed
-                if ("youtube.com" in search or "youtu.be" in search) and search.startswith(("http://", "https://")):
-                    title_from_oembed, author_from_oembed = get_youtube_title_oembed(search)
+                if ("youtube.com" in clean_search or "youtu.be" in clean_search) and clean_search.startswith(("http://", "https://")):
+                    title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
                     if title_from_oembed:
-                        query = f"{title_from_oembed} {author_from_oembed or ''}".strip()
+                        cleaned = clean_search_query(title_from_oembed)
+                        query = f"{cleaned} {author_from_oembed or ''}".strip()
 
-                print(f"[YTDL Warning] YouTube search failed for '{search}': {e}. Trying SoundCloud fallback with query: '{query}'...", flush=True)
+                print(f"[YTDL Warning] YouTube extraction failed for '{clean_search}': {e}. Trying fallback search for: '{query}'...", flush=True)
+                
+                # 1. First fallback: YouTube search (useful if direct URL or tab had issues)
+                if query != clean_search:
+                    try:
+                        yt_search_data = ytdl.extract_info(f"ytsearch1:{query}", download=False)
+                        if yt_search_data and yt_search_data.get('entries'):
+                            return yt_search_data
+                    except Exception as yt_err:
+                        print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
+
+                # 2. Second fallback: SoundCloud search
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
                     sc_data = sc_ytdl.extract_info(f"scsearch:{query}", download=False)
@@ -168,7 +230,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 if title_from_oembed:
                     return {
                         'title': title_from_oembed,
-                        'webpage_url': search,
+                        'webpage_url': clean_search,
                         'uploader': author_from_oembed or 'YouTube',
                         'duration': 0,
                         'id': None
@@ -201,18 +263,36 @@ class YTDLSource(discord.PCMVolumeTransformer):
         
         webpage_url = track_info.get('webpage_url') if isinstance(track_info, dict) else track_info
         title = track_info.get('title', webpage_url) if isinstance(track_info, dict) else webpage_url
+        clean_url = clean_youtube_url(webpage_url) if isinstance(webpage_url, str) else webpage_url
         
         def _extract():
-            ytdl = get_ytdl_instance()
+            # Playing a single audio track - NEVER extract playlists or tabs
+            ytdl = get_ytdl_instance(noplaylist=True)
             try:
-                return ytdl.extract_info(webpage_url, download=False)
+                return ytdl.extract_info(clean_url, download=False)
             except Exception as e:
-                print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Using SoundCloud fallback...", flush=True)
+                cleaned_title = clean_search_query(title)
+                print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Attempting search fallback with '{cleaned_title}'...", flush=True)
+                
+                # Try YouTube search fallback first
+                if isinstance(clean_url, str) and clean_url.startswith(("http://", "https://")):
+                    try:
+                        yt_res = ytdl.extract_info(f"ytsearch1:{cleaned_title}", download=False)
+                        if 'entries' in yt_res and yt_res['entries']:
+                            return yt_res['entries'][0]
+                    except Exception as yt_err:
+                        print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
+
+                # Fallback to SoundCloud
                 sc_ytdl = get_soundcloud_ytdl_instance()
-                res = sc_ytdl.extract_info(f"scsearch:{title}", download=False)
-                if 'entries' in res and res['entries']:
-                    return res['entries'][0]
-                return res
+                try:
+                    res = sc_ytdl.extract_info(f"scsearch:{cleaned_title}", download=False)
+                    if 'entries' in res and res['entries']:
+                        return res['entries'][0]
+                    return res
+                except Exception as sc_err:
+                    print(f"[SoundCloud Warning] SoundCloud search failed: {sc_err}", flush=True)
+                    return {'entries': []}
 
         data = await loop.run_in_executor(None, _extract)
         
