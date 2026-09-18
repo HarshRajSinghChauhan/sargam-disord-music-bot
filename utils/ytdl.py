@@ -117,6 +117,7 @@ import json
 import re
 import urllib.request
 import urllib.parse as urlparse
+from utils.saavn import search_saavn
 
 # Suppress noise about console usage from errors
 yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
@@ -408,7 +409,12 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 except Exception as yt_err:
                     print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
 
-                # 2. Second fallback: SoundCloud search (strict filter to prevent slowed/covers)
+                # 2. Second fallback: JioSaavn (320kbps official studio audio - immune to datacenter blocks)
+                saavn_track = search_saavn(query)
+                if saavn_track:
+                    return {'entries': [saavn_track]}
+
+                # 3. Third fallback: SoundCloud search (strict filter to prevent slowed/covers)
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
                     sc_data = sc_ytdl.extract_info(f"scsearch5:{query}", download=False)
@@ -447,7 +453,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
             'webpage_url': data.get('webpage_url') or data.get('url'),
             'uploader': data.get('uploader'),
             'duration': data.get('duration'),
-            'id': data.get('id')
+            'id': data.get('id'),
+            'url': data.get('url'),
+            'extractor': data.get('extractor')
         }
 
     @classmethod
@@ -471,11 +479,15 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 except Exception as sc_url_err:
                     print(f"[SoundCloud Warning] Direct SoundCloud extraction failed: {sc_url_err}", flush=True)
 
+            # If track is from JioSaavn or already has a direct audio stream URL, return it directly
+            if isinstance(track_info, dict) and track_info.get('extractor') == 'jiosaavn' and track_info.get('url'):
+                return track_info
+
             try:
                 return extract_youtube_info(clean_url, noplaylist=True)
             except Exception as e:
                 cleaned_title = clean_search_query(title)
-                print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Attempting YouTube search fallback with '{cleaned_title}'...", flush=True)
+                print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Attempting fallback with '{cleaned_title}'...", flush=True)
 
                 # 1. Try YouTube search fallback (with Android mobile client)
                 try:
@@ -485,7 +497,12 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 except Exception as yt_err:
                     print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
 
-                # 2. Fallback to SoundCloud (strict filter against slowed/covers)
+                # 2. Try JioSaavn fallback (320kbps official studio audio - immune to datacenter blocks)
+                saavn_track = search_saavn(cleaned_title)
+                if saavn_track:
+                    return saavn_track
+
+                # 3. Fallback to SoundCloud (strict filter against slowed/covers)
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
                     res = sc_ytdl.extract_info(f"scsearch5:{cleaned_title}", download=False)
