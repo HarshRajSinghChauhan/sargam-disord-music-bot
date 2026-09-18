@@ -117,7 +117,7 @@ def format_as_netscape_cookies(content):
 
 _cookies_written = False
 
-def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True):
+def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_proxy: bool = True):
     global _cookies_written
     cookies_path = 'cookies.txt'
     cookies_env = os.getenv('YOUTUBE_COOKIES')
@@ -154,18 +154,48 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True):
     }
     
     # Optional proxy to bypass datacenter IP bans (supports single proxy or comma-separated list for auto-rotation)
-    proxy_env = os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY')
-    if proxy_env:
-        proxies = [p.strip() for p in proxy_env.split(',') if p.strip()]
-        if proxies:
-            import random
-            selected_proxy = random.choice(proxies)
-            options['proxy'] = selected_proxy
+    if use_proxy:
+        proxy_env = os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY')
+        if proxy_env:
+            proxies = [p.strip() for p in proxy_env.split(',') if p.strip()]
+            if proxies:
+                import random
+                selected_proxy = random.choice(proxies)
+                options['proxy'] = selected_proxy
     
     if use_cookies and os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
         options['cookiefile'] = cookies_path
 
     return yt_dlp.YoutubeDL(options)
+
+def extract_youtube_info(target: str, noplaylist: bool = False):
+    cookies_available = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
+    proxy_available = bool(os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY'))
+
+    attempts = []
+    if cookies_available:
+        attempts.append({'use_cookies': True, 'use_proxy': True, 'desc': 'with cookies'})
+    attempts.append({'use_cookies': False, 'use_proxy': True, 'desc': 'without cookies (visionos)'})
+    if proxy_available:
+        attempts.append({'use_cookies': False, 'use_proxy': False, 'desc': 'without cookies & direct IP'})
+
+    last_err = None
+    for attempt in attempts:
+        try:
+            ydl = get_ytdl_instance(
+                noplaylist=noplaylist,
+                use_cookies=attempt['use_cookies'],
+                use_proxy=attempt['use_proxy']
+            )
+            data = ydl.extract_info(target, download=False)
+            if data:
+                return data
+        except Exception as err:
+            last_err = err
+            print(f"[YTDL] Attempt {attempt['desc']} failed for '{target}': {err}", flush=True)
+
+    raise last_err or Exception(f"Failed to extract YouTube info for {target}")
+
 
 def get_soundcloud_ytdl_instance():
     return yt_dlp.YoutubeDL({
@@ -211,20 +241,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
         is_explicit_playlist = ('playlist?list=' in clean_search) or ('list=PL' in clean_search) or ('list=OLAK' in clean_search)
         
         def _extract():
-            cookies_file_exists = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
-            ytdl = get_ytdl_instance(noplaylist=not is_explicit_playlist, use_cookies=True)
             try:
-                return ytdl.extract_info(clean_search, download=False)
+                return extract_youtube_info(clean_search, noplaylist=not is_explicit_playlist)
             except Exception as e:
-                # If extraction with cookies failed, retry without cookies in case cookies are expired/flagged
-                if cookies_file_exists and ('player response' in str(e).lower() or 'sign in' in str(e).lower() or '403' in str(e).lower()):
-                    try:
-                        print("[YTDL Warning] Extraction with cookies failed. Retrying without cookies...", flush=True)
-                        ytdl_no_cookie = get_ytdl_instance(noplaylist=not is_explicit_playlist, use_cookies=False)
-                        return ytdl_no_cookie.extract_info(clean_search, download=False)
-                    except Exception as no_cookie_err:
-                        e = no_cookie_err
-
                 query = clean_search
                 title_from_oembed = None
                 author_from_oembed = None
@@ -240,7 +259,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 # 1. First fallback: YouTube search
                 if query != clean_search:
                     try:
-                        yt_search_data = ytdl.extract_info(f"ytsearch1:{query}", download=False)
+                        yt_search_data = extract_youtube_info(f"ytsearch1:{query}", noplaylist=True)
                         if yt_search_data and yt_search_data.get('entries'):
                             return yt_search_data
                     except Exception as yt_err:
@@ -314,26 +333,16 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 except Exception as sc_url_err:
                     print(f"[SoundCloud Warning] Direct SoundCloud extraction failed: {sc_url_err}", flush=True)
 
-            ytdl = get_ytdl_instance(noplaylist=True, use_cookies=True)
             try:
-                return ytdl.extract_info(clean_url, download=False)
+                return extract_youtube_info(clean_url, noplaylist=True)
             except Exception as e:
-                # If extraction with cookies failed, retry without cookies
-                if cookies_file_exists and ('player response' in str(e).lower() or 'sign in' in str(e).lower() or '403' in str(e).lower()):
-                    try:
-                        print("[YTDL Warning] Stream extraction with cookies failed. Retrying without cookies...", flush=True)
-                        ytdl_no_cookie = get_ytdl_instance(noplaylist=True, use_cookies=False)
-                        return ytdl_no_cookie.extract_info(clean_url, download=False)
-                    except Exception as no_cookie_err:
-                        e = no_cookie_err
-
                 cleaned_title = clean_search_query(title)
                 print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Attempting search fallback with '{cleaned_title}'...", flush=True)
                 
                 # Try YouTube search fallback first
                 if isinstance(clean_url, str) and clean_url.startswith(("http://", "https://")):
                     try:
-                        yt_res = ytdl.extract_info(f"ytsearch1:{cleaned_title}", download=False)
+                        yt_res = extract_youtube_info(f"ytsearch1:{cleaned_title}", noplaylist=True)
                         if 'entries' in yt_res and yt_res['entries']:
                             return yt_res['entries'][0]
                     except Exception as yt_err:
