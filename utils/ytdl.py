@@ -173,8 +173,21 @@ def get_soundcloud_ytdl_instance():
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
+        'ignoreerrors': True,
         'default_search': 'scsearch'
     })
+
+def is_valid_soundcloud_entry(entry):
+    if not isinstance(entry, dict):
+        return False
+    url = str(entry.get('url', '')).lower()
+    if not url or 'cf-preview-media' in url or '/preview/' in url:
+        return False
+    duration = entry.get('duration')
+    if duration is not None and duration <= 30:
+        return False
+    return True
+
 
 ffmpeg_options = {
     'options': '-vn',
@@ -236,9 +249,14 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 # 2. Second fallback: SoundCloud search
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
-                    sc_data = sc_ytdl.extract_info(f"scsearch:{query}", download=False)
+                    sc_data = sc_ytdl.extract_info(f"scsearch5:{query}", download=False)
                     if sc_data and sc_data.get('entries'):
-                        return sc_data
+                        valid_entries = [e for e in sc_data['entries'] if is_valid_soundcloud_entry(e)]
+                        if not valid_entries:
+                            valid_entries = [e for e in sc_data['entries'] if e and (e.get('url') or e.get('webpage_url'))]
+                        if valid_entries:
+                            sc_data['entries'] = valid_entries
+                            return sc_data
                 except Exception as sc_err:
                     print(f"[SoundCloud Warning] SoundCloud search failed: {sc_err}", flush=True)
 
@@ -283,6 +301,19 @@ class YTDLSource(discord.PCMVolumeTransformer):
         def _extract():
             # Playing a single audio track - NEVER extract playlists or tabs
             cookies_file_exists = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
+
+            # If the URL is already a direct SoundCloud URL, use the SoundCloud extractor directly
+            if isinstance(clean_url, str) and 'soundcloud.com' in clean_url:
+                sc_ytdl = get_soundcloud_ytdl_instance()
+                try:
+                    res = sc_ytdl.extract_info(clean_url, download=False)
+                    if res and is_valid_soundcloud_entry(res):
+                        return res
+                    if res and res.get('url'):
+                        return res
+                except Exception as sc_url_err:
+                    print(f"[SoundCloud Warning] Direct SoundCloud extraction failed: {sc_url_err}", flush=True)
+
             ytdl = get_ytdl_instance(noplaylist=True, use_cookies=True)
             try:
                 return ytdl.extract_info(clean_url, download=False)
@@ -311,10 +342,18 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 # Fallback to SoundCloud
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
-                    res = sc_ytdl.extract_info(f"scsearch:{cleaned_title}", download=False)
-                    if 'entries' in res and res['entries']:
-                        return res['entries'][0]
-                    return res
+                    res = sc_ytdl.extract_info(f"scsearch5:{cleaned_title}", download=False)
+                    if res and 'entries' in res and res['entries']:
+                        valid_entries = [e for e in res['entries'] if is_valid_soundcloud_entry(e)]
+                        if valid_entries:
+                            return valid_entries[0]
+                        for entry in res['entries']:
+                            if entry and entry.get('url'):
+                                return entry
+                    if res and is_valid_soundcloud_entry(res):
+                        return res
+                    if res and res.get('url'):
+                        return res
                 except Exception as sc_err:
                     print(f"[SoundCloud Warning] SoundCloud search failed: {sc_err}", flush=True)
                     return {'entries': []}
