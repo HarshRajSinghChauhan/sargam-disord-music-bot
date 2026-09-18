@@ -219,6 +219,135 @@ def is_valid_soundcloud_entry(entry):
     return True
 
 
+# Public Invidious instances — used as fallback when YouTube blocks Render's datacenter IP
+# These are verified to have the API enabled (api=True at https://api.invidious.io/instances.json)
+_INVIDIOUS_INSTANCES = [
+    'https://invidious.f5.si',
+]
+
+_invidious_discovered = False
+
+def _discover_invidious_instances():
+    """Dynamically fetch the current list of API-enabled Invidious instances."""
+    global _invidious_discovered
+    if _invidious_discovered:
+        return
+    try:
+        req = urllib.request.Request(
+            'https://api.invidious.io/instances.json?sort_by=health',
+            headers={'User-Agent': 'Mozilla/5.0 (compatible; SargamBot/1.0)'}
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            instances = json.loads(resp.read())
+        new_list = [
+            data['uri'] for name, data in instances
+            if data.get('api') is True and data.get('type') == 'https' and data.get('uri')
+        ]
+        if new_list:
+            _INVIDIOUS_INSTANCES.clear()
+            _INVIDIOUS_INSTANCES.extend(new_list)
+            print(f"[Invidious] Discovered {len(new_list)} API instances", flush=True)
+        _invidious_discovered = True
+    except Exception as e:
+        print(f"[Invidious] Instance discovery failed (using defaults): {e}", flush=True)
+        _invidious_discovered = True  # Don't retry continuously
+
+
+def get_invidious_stream(video_id: str):
+    """
+    Fetch the best audio stream URL for a YouTube video_id via the Invidious API.
+    Invidious runs its own servers — not blocked by Render's IP.
+    Returns a dict with keys: title, url, webpage_url, uploader, duration, http_headers.
+    """
+    import random
+    _discover_invidious_instances()
+    instances = _INVIDIOUS_INSTANCES[:]
+    random.shuffle(instances)
+
+    for base_url in instances:
+        try:
+            api_url = f"{base_url}/api/v1/videos/{video_id}?fields=title,author,lengthSeconds,adaptiveFormats,formatStreams"
+            req = urllib.request.Request(api_url, headers={
+                'User-Agent': 'Mozilla/5.0 (compatible; SargamBot/1.0)',
+                'Accept': 'application/json'
+            })
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+
+            # Pick best audio-only format (prefer opus/webm, fallback to mp4a/m4a)
+            best_audio = None
+            best_bitrate = 0
+            for fmt in data.get('adaptiveFormats', []):
+                mime = fmt.get('type', '')
+                if not ('audio' in mime):
+                    continue
+                bitrate = int(fmt.get('bitrate', 0))
+                if bitrate > best_bitrate:
+                    best_audio = fmt
+                    best_bitrate = bitrate
+
+            # Final fallback: pick from formatStreams if adaptiveFormats had nothing
+            if not best_audio:
+                for fmt in data.get('formatStreams', []):
+                    mime = fmt.get('type', '')
+                    if 'audio' in mime or 'mp4' in mime:
+                        best_audio = fmt
+                        break
+
+            if not best_audio or not best_audio.get('url'):
+                continue
+
+            stream_url = best_audio['url']
+            # If Invidious returns a relative URL, prefix the instance base
+            if stream_url.startswith('/'):
+                stream_url = base_url + stream_url
+
+            print(f"[Invidious] Got stream for {video_id} via {base_url}", flush=True)
+            return {
+                'title': data.get('title', ''),
+                'url': stream_url,
+                'webpage_url': f'https://www.youtube.com/watch?v={video_id}',
+                'uploader': data.get('author', ''),
+                'duration': int(data.get('lengthSeconds', 0)),
+                'http_headers': {'User-Agent': 'Mozilla/5.0'},
+                'extractor': 'invidious',
+            }
+        except Exception as e:
+            print(f"[Invidious] {base_url} failed for {video_id}: {e}", flush=True)
+
+    return None
+
+
+def search_invidious(query: str, max_results: int = 1):
+    """
+    Search YouTube videos via Invidious API (bypasses Render's blocked IP).
+    Returns a list of dicts with videoId, title, author, lengthSeconds.
+    """
+    import random
+    _discover_invidious_instances()
+    instances = _INVIDIOUS_INSTANCES[:]
+    random.shuffle(instances)
+
+    encoded_q = urllib.parse.quote(query)
+    for base_url in instances:
+        try:
+            api_url = f"{base_url}/api/v1/search?q={encoded_q}&type=video&fields=videoId,title,author,lengthSeconds&page=1"
+            req = urllib.request.Request(api_url, headers={
+                'User-Agent': 'Mozilla/5.0 (compatible; SargamBot/1.0)',
+                'Accept': 'application/json'
+            })
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                results = json.loads(resp.read().decode('utf-8'))
+
+            if results and isinstance(results, list):
+                print(f"[Invidious] Search '{query}' via {base_url}: {len(results)} results", flush=True)
+                return results[:max_results]
+        except Exception as e:
+            print(f"[Invidious] Search via {base_url} failed: {e}", flush=True)
+
+    return []
+
+
 ffmpeg_options = {
     'options': '-vn',
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
@@ -255,17 +384,17 @@ class YTDLSource(discord.PCMVolumeTransformer):
                         query = clean_search_query(title_from_oembed)
 
                 print(f"[YTDL Warning] YouTube extraction failed for '{clean_search}': {e}. Trying fallback search for: '{query}'...", flush=True)
-                
-                # 1. First fallback: YouTube search
-                if query != clean_search:
-                    try:
-                        yt_search_data = extract_youtube_info(f"ytsearch1:{query}", noplaylist=True)
-                        if yt_search_data and yt_search_data.get('entries'):
-                            return yt_search_data
-                    except Exception as yt_err:
-                        print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
 
-                # 2. Second fallback: SoundCloud search
+                # 1. Invidious fallback (bypasses datacenter IP block)
+                inv_results = search_invidious(query, max_results=1)
+                if inv_results:
+                    vid_id = inv_results[0].get('videoId')
+                    if vid_id:
+                        inv_data = get_invidious_stream(vid_id)
+                        if inv_data:
+                            return {'entries': [inv_data]}
+
+                # 2. SoundCloud search (last resort)
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
                     sc_data = sc_ytdl.extract_info(f"scsearch5:{query}", download=False)
@@ -337,18 +466,35 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 return extract_youtube_info(clean_url, noplaylist=True)
             except Exception as e:
                 cleaned_title = clean_search_query(title)
-                print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Attempting search fallback with '{cleaned_title}'...", flush=True)
-                
-                # Try YouTube search fallback first
-                if isinstance(clean_url, str) and clean_url.startswith(("http://", "https://")):
-                    try:
-                        yt_res = extract_youtube_info(f"ytsearch1:{cleaned_title}", noplaylist=True)
-                        if 'entries' in yt_res and yt_res['entries']:
-                            return yt_res['entries'][0]
-                    except Exception as yt_err:
-                        print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
+                print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Attempting fallback...", flush=True)
 
-                # Fallback to SoundCloud
+                # 1. Try Invidious (bypasses datacenter IP block — uses public YouTube frontend)
+                # Extract video_id from YouTube URL if possible
+                yt_video_id = None
+                if isinstance(clean_url, str) and ('youtube.com' in clean_url or 'youtu.be' in clean_url):
+                    try:
+                        parsed_yt = urlparse.urlparse(clean_url)
+                        yt_video_id = urlparse.parse_qs(parsed_yt.query).get('v', [None])[0]
+                        if not yt_video_id and parsed_yt.netloc in ('youtu.be', 'www.youtu.be'):
+                            yt_video_id = parsed_yt.path.lstrip('/')
+                    except Exception:
+                        pass
+
+                if yt_video_id:
+                    inv_data = get_invidious_stream(yt_video_id)
+                    if inv_data:
+                        return inv_data
+                else:
+                    # Non-URL query — search Invidious then get stream
+                    inv_results = search_invidious(cleaned_title, max_results=1)
+                    if inv_results:
+                        vid_id = inv_results[0].get('videoId')
+                        if vid_id:
+                            inv_data = get_invidious_stream(vid_id)
+                            if inv_data:
+                                return inv_data
+
+                # 2. Fallback to SoundCloud (last resort)
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
                     res = sc_ytdl.extract_info(f"scsearch5:{cleaned_title}", download=False)
