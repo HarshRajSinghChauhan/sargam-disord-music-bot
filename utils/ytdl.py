@@ -153,10 +153,14 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True):
         }
     }
     
-    # Optional proxy to bypass datacenter IP bans (e.g. on Render / AWS)
-    proxy = os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY')
-    if proxy:
-        options['proxy'] = proxy
+    # Optional proxy to bypass datacenter IP bans (supports single proxy or comma-separated list for auto-rotation)
+    proxy_env = os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY')
+    if proxy_env:
+        proxies = [p.strip() for p in proxy_env.split(',') if p.strip()]
+        if proxies:
+            import random
+            selected_proxy = random.choice(proxies)
+            options['proxy'] = selected_proxy
     
     if use_cookies and os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
         options['cookiefile'] = cookies_path
