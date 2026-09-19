@@ -10,6 +10,46 @@ except ImportError:
     pyDes = None
 
 _DES_KEY = b'38346591'
+_STOPWORDS = {'official', 'video', 'audio', 'song', 'full', 'lyrics', 'lyric', 'version', 'remix', 'the', 'a', 'an', 'and', 'by', 'in', 'of', 'to', 'feat', 'ft'}
+
+def is_saavn_match(query: str, song_title: str, singers: str, album: str = '') -> bool:
+    """Verify that a JioSaavn candidate song actually matches the search query."""
+    cleaned_q = re.sub(r'[\(\[][^\)\]]*[\)\]]', '', query).strip()
+    
+    cand_title = (song_title or '').lower().strip()
+    cand_artists = (singers or '').lower().strip()
+    cand_album = (album or '').lower().strip()
+    cand_text = f"{cand_title} {cand_artists} {cand_album}"
+
+    # Check if query has an explicit separator like 'Artist - Title' or 'Title by Artist'
+    parts = re.split(r'\s*[-\u2013\u2014|:]\s*|\s+by\s+', cleaned_q, flags=re.IGNORECASE)
+    if len(parts) >= 2:
+        for part in parts:
+            part_tokens = [w for w in re.findall(r'\w+', part.lower()) if len(w) > 1 and w not in _STOPWORDS]
+            # Each distinct segment (e.g. artist part or title part) must have at least one token in candidate
+            if part_tokens and not any(t in cand_text for t in part_tokens):
+                return False
+
+    q_tokens = [w for w in re.findall(r'\w+', cleaned_q.lower()) if len(w) > 1 and w not in _STOPWORDS]
+    if not q_tokens:
+        return True
+
+    # If title is an exact match (e.g. 'Meri Banogi Kya')
+    clean_cand_title = re.sub(r'[\(\[][^\)\]]*[\)\]]', '', cand_title).strip()
+    if clean_cand_title == cleaned_q.lower():
+        return True
+
+    # Check for distinctive tokens (length >= 4) in the query; e.g. artist names like 'Kaavish' or unique words
+    distinctive_q_tokens = [w for w in q_tokens if len(w) >= 4]
+    for dt in distinctive_q_tokens:
+        if dt not in cand_text and not any(dt in ct or ct in dt for ct in re.findall(r'\w+', cand_text) if len(ct) >= 4):
+            return False
+
+    # Check overall token overlap
+    cand_tokens = set(re.findall(r'\w+', cand_text))
+    matched = [t for t in q_tokens if t in cand_tokens or any(ct.startswith(t) or t.startswith(ct) for ct in cand_tokens if len(ct) > 3 and len(t) > 3)]
+    overlap_ratio = len(matched) / len(q_tokens)
+    return overlap_ratio >= 0.5
 
 def decrypt_saavn_url(encrypted_url: str) -> str:
     """Decrypt JioSaavn's encrypted_media_url using DES-ECB."""
@@ -53,8 +93,20 @@ def search_saavn(query: str):
         if not songs:
             return None
 
-        # Pick best matching song
-        song_id = songs[0].get('id')
+        # Find first song that authentically matches the search query
+        matching_song = None
+        for s in songs:
+            s_title = s.get('title', '')
+            s_desc = s.get('description', '')
+            s_album = s.get('album', '')
+            if is_saavn_match(cleaned, s_title, s_desc, s_album):
+                matching_song = s
+                break
+
+        if not matching_song:
+            return None
+
+        song_id = matching_song.get('id')
         if not song_id:
             return None
 

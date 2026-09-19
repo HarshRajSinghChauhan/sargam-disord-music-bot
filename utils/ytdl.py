@@ -389,62 +389,58 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 if saavn_track:
                     return {'entries': [saavn_track]}
 
-            # 2. Fast path for YouTube URL: resolve title via oEmbed (0.2s) and check JioSaavn (0.5s)
+            # 2. For YouTube URL or direct link: try direct extraction FIRST for the exact video
             title_from_oembed = None
             author_from_oembed = None
-            if is_url and ("youtube.com" in clean_search or "youtu.be" in clean_search) and not is_explicit_playlist:
-                title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
-                if title_from_oembed:
-                    cleaned_q = clean_search_query(title_from_oembed)
-                    saavn_track = search_saavn(cleaned_q)
-                    if saavn_track:
-                        return {'entries': [saavn_track]}
+            if is_url:
+                try:
+                    return extract_youtube_info(clean_search, noplaylist=not is_explicit_playlist)
+                except Exception as e:
+                    print(f"[YTDL Warning] Direct YouTube extraction failed for '{clean_search}': {e}. Trying fallbacks...", flush=True)
+                    if "youtube.com" in clean_search or "youtu.be" in clean_search:
+                        title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
 
-            # 3. Fallback: try YouTube extraction with fast 5s timeout
+            # 3. Fallback / search resolution path
+            if title_from_oembed:
+                query = clean_search_query(f"{title_from_oembed} {author_from_oembed or ''}")
+            else:
+                query = clean_search_query(clean_search)
+
+            # Fallback 1: Try JioSaavn with strict matching (only authentic studio matches accepted)
+            saavn_track = search_saavn(query)
+            if saavn_track:
+                return {'entries': [saavn_track]}
+
+            # Fallback 2: YouTube search fallback
             try:
-                return extract_youtube_info(clean_search, noplaylist=not is_explicit_playlist)
-            except Exception as e:
-                query = clean_search
-                if title_from_oembed:
-                    query = clean_search_query(title_from_oembed)
+                yt_search_data = extract_youtube_info(f"ytsearch1:{query}", noplaylist=True)
+                if yt_search_data and yt_search_data.get('entries'):
+                    return yt_search_data
+            except Exception as yt_err:
+                print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
 
-                print(f"[YTDL Warning] Direct YouTube extraction failed for '{clean_search}': {e}. Trying fallbacks...", flush=True)
+            # Fallback 3: SoundCloud search
+            sc_ytdl = get_soundcloud_ytdl_instance()
+            try:
+                sc_data = sc_ytdl.extract_info(f"scsearch5:{query}", download=False)
+                if sc_data and sc_data.get('entries'):
+                    valid_entries = [e for e in sc_data['entries'] if is_valid_soundcloud_entry(e, query)]
+                    if valid_entries:
+                        sc_data['entries'] = valid_entries
+                        return sc_data
+            except Exception as sc_err:
+                print(f"[SoundCloud Warning] SoundCloud search failed: {sc_err}", flush=True)
 
-                # Check JioSaavn if not checked earlier
-                saavn_track = search_saavn(query)
-                if saavn_track:
-                    return {'entries': [saavn_track]}
+            if title_from_oembed:
+                return {
+                    'title': title_from_oembed,
+                    'webpage_url': clean_search,
+                    'uploader': author_from_oembed or 'YouTube',
+                    'duration': 0,
+                    'id': None
+                }
 
-                # Quick YouTube search fallback
-                try:
-                    yt_search_data = extract_youtube_info(f"ytsearch1:{query}", noplaylist=True)
-                    if yt_search_data and yt_search_data.get('entries'):
-                        return yt_search_data
-                except Exception as yt_err:
-                    print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
-
-                # Last resort: SoundCloud search
-                sc_ytdl = get_soundcloud_ytdl_instance()
-                try:
-                    sc_data = sc_ytdl.extract_info(f"scsearch5:{query}", download=False)
-                    if sc_data and sc_data.get('entries'):
-                        valid_entries = [e for e in sc_data['entries'] if is_valid_soundcloud_entry(e, query)]
-                        if valid_entries:
-                            sc_data['entries'] = valid_entries
-                            return sc_data
-                except Exception as sc_err:
-                    print(f"[SoundCloud Warning] SoundCloud search failed: {sc_err}", flush=True)
-
-                if title_from_oembed:
-                    return {
-                        'title': title_from_oembed,
-                        'webpage_url': clean_search,
-                        'uploader': author_from_oembed or 'YouTube',
-                        'duration': 0,
-                        'id': None
-                    }
-
-                return {'entries': []}
+            return {'entries': []}
 
         data = await loop.run_in_executor(None, _extract)
         
@@ -464,7 +460,8 @@ class YTDLSource(discord.PCMVolumeTransformer):
             'duration': data.get('duration'),
             'id': data.get('id'),
             'url': data.get('url'),
-            'extractor': data.get('extractor')
+            'extractor': data.get('extractor'),
+            'http_headers': data.get('http_headers')
         }
 
     @classmethod
@@ -499,40 +496,41 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 except Exception as sc_url_err:
                     print(f"[SoundCloud Warning] Direct SoundCloud extraction failed: {sc_url_err}", flush=True)
 
+            # If it's a YouTube URL, extract audio from that exact video first!
+            if isinstance(clean_url, str) and ('youtube.com' in clean_url or 'youtu.be' in clean_url):
+                try:
+                    return extract_youtube_info(clean_url, noplaylist=True)
+                except Exception as e:
+                    print(f"[YTDL Warning] Direct YouTube stream extraction failed for '{title}': {e}. Trying fallbacks...", flush=True)
+
             cleaned_title = clean_search_query(title)
 
-            # Check JioSaavn FIRST before waiting on slow YouTube retries
+            # Fallback 1: Check JioSaavn with strict matching
             saavn_track = search_saavn(cleaned_title)
             if saavn_track:
                 return saavn_track
 
-            # Try YouTube extraction
+            # Fallback 2: Quick YouTube search fallback
             try:
-                return extract_youtube_info(clean_url, noplaylist=True)
-            except Exception as e:
-                print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Attempting fallback with '{cleaned_title}'...", flush=True)
+                yt_res = extract_youtube_info(f"ytsearch1:{cleaned_title}", noplaylist=True)
+                if 'entries' in yt_res and yt_res['entries']:
+                    return yt_res['entries'][0]
+            except Exception as yt_err:
+                print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
 
-                # Quick YouTube search fallback
-                try:
-                    yt_res = extract_youtube_info(f"ytsearch1:{cleaned_title}", noplaylist=True)
-                    if 'entries' in yt_res and yt_res['entries']:
-                        return yt_res['entries'][0]
-                except Exception as yt_err:
-                    print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
-
-                # Fallback to SoundCloud
-                sc_ytdl = get_soundcloud_ytdl_instance()
-                try:
-                    res = sc_ytdl.extract_info(f"scsearch5:{cleaned_title}", download=False)
-                    if res and 'entries' in res and res['entries']:
-                        valid_entries = [e for e in res['entries'] if is_valid_soundcloud_entry(e, cleaned_title)]
-                        if valid_entries:
-                            return valid_entries[0]
-                    if res and is_valid_soundcloud_entry(res, cleaned_title):
-                        return res
-                except Exception as sc_err:
-                    print(f"[SoundCloud Warning] SoundCloud search failed: {sc_err}", flush=True)
-                    return {'entries': []}
+            # Fallback 3: Fallback to SoundCloud
+            sc_ytdl = get_soundcloud_ytdl_instance()
+            try:
+                res = sc_ytdl.extract_info(f"scsearch5:{cleaned_title}", download=False)
+                if res and 'entries' in res and res['entries']:
+                    valid_entries = [e for e in res['entries'] if is_valid_soundcloud_entry(e, cleaned_title)]
+                    if valid_entries:
+                        return valid_entries[0]
+                if res and is_valid_soundcloud_entry(res, cleaned_title):
+                    return res
+            except Exception as sc_err:
+                print(f"[SoundCloud Warning] SoundCloud search failed: {sc_err}", flush=True)
+                return {'entries': []}
 
         data = await loop.run_in_executor(None, _extract)
         
