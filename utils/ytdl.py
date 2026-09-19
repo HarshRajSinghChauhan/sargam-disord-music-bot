@@ -247,7 +247,7 @@ def ensure_cookies_written():
 # Write cookies immediately on startup if available
 ensure_cookies_written()
 
-def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_proxy: bool = True, player_clients: list = None):
+def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_proxy: bool = False, player_clients: list = None):
     ensure_cookies_written()
     cookies_path = 'cookies.txt'
     
@@ -267,6 +267,9 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
         'no_warnings': True,
         'default_search': 'auto',
         'source_address': '0.0.0.0',
+        'socket_timeout': 5,  # Fast 5s timeout to prevent hanging on dead connections
+        'retries': 0,
+        'fragment_retries': 0,
         'js_runtimes': {'node': {}, 'deno': {}},
         'extractor_args': {
             'youtubetab': {
@@ -278,7 +281,7 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
         }
     }
     
-    # Optional proxy support (supports single proxy or comma-separated list for auto-rotation)
+    # Optional proxy support only when explicitly requested
     if use_proxy:
         proxy_env = os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY')
         if proxy_env:
@@ -296,21 +299,12 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
 def extract_youtube_info(target: str, noplaylist: bool = False):
     ensure_cookies_written()
     cookies_available = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
-    proxy_available = bool(os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY'))
 
+    # Keep attempts fast and direct (max 2 attempts, 5s timeout each)
     attempts = []
-    # Primary attempts using Android/iOS clients (effective on datacenter IPs like Render)
     if cookies_available:
-        if proxy_available:
-            attempts.append({'use_cookies': True, 'use_proxy': True, 'clients': ['android', 'ios'], 'desc': 'android client with cookies & proxy'})
-        attempts.append({'use_cookies': True, 'use_proxy': False, 'clients': ['android', 'ios'], 'desc': 'android client with cookies direct IP'})
-    if proxy_available:
-        attempts.append({'use_cookies': False, 'use_proxy': True, 'clients': ['android', 'ios'], 'desc': 'android client without cookies & proxy'})
-    attempts.append({'use_cookies': False, 'use_proxy': False, 'clients': ['android', 'ios'], 'desc': 'android client without cookies direct IP'})
-
-    # Fallback clients
-    attempts.append({'use_cookies': False, 'use_proxy': False, 'clients': ['tv_embedded', 'android_creator'], 'desc': 'tv_embedded/android_creator fallback'})
-    attempts.append({'use_cookies': False, 'use_proxy': False, 'clients': None, 'desc': 'default yt-dlp clients'})
+        attempts.append({'use_cookies': True, 'use_proxy': False, 'clients': ['android', 'ios'], 'desc': 'android client with cookies'})
+    attempts.append({'use_cookies': False, 'use_proxy': False, 'clients': ['android', 'ios'], 'desc': 'android client direct IP'})
 
     last_err = None
     for attempt in attempts:
@@ -318,7 +312,7 @@ def extract_youtube_info(target: str, noplaylist: bool = False):
             ydl = get_ytdl_instance(
                 noplaylist=noplaylist,
                 use_cookies=attempt['use_cookies'],
-                use_proxy=attempt['use_proxy'],
+                use_proxy=attempt.get('use_proxy', False),
                 player_clients=attempt.get('clients')
             )
             data = ydl.extract_info(target, download=False)
@@ -338,6 +332,8 @@ def get_soundcloud_ytdl_instance():
         'no_warnings': True,
         'nocheckcertificate': True,
         'ignoreerrors': True,
+        'socket_timeout': 5,
+        'retries': 0,
         'default_search': 'scsearch'
     })
 
@@ -383,25 +379,43 @@ class YTDLSource(discord.PCMVolumeTransformer):
     async def create_source(cls, ctx, search: str, *, loop=None):
         loop = loop or asyncio.get_event_loop()
         clean_search = clean_youtube_url(search.strip())
-        is_explicit_playlist = ('playlist?list=' in clean_search) or ('list=PL' in clean_search) or ('list=OLAK' in clean_search)
+        is_url = clean_search.startswith(("http://", "https://"))
+        is_explicit_playlist = is_url and (('playlist?list=' in clean_search) or ('list=PL' in clean_search) or ('list=OLAK' in clean_search))
         
         def _extract():
+            # 1. Fast path for text search: check JioSaavn FIRST (instant 0.5s response, 320kbps CD master)
+            if not is_url:
+                saavn_track = search_saavn(clean_search)
+                if saavn_track:
+                    return {'entries': [saavn_track]}
+
+            # 2. Fast path for YouTube URL: resolve title via oEmbed (0.2s) and check JioSaavn (0.5s)
+            title_from_oembed = None
+            author_from_oembed = None
+            if is_url and ("youtube.com" in clean_search or "youtu.be" in clean_search) and not is_explicit_playlist:
+                title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
+                if title_from_oembed:
+                    cleaned_q = clean_search_query(title_from_oembed)
+                    saavn_track = search_saavn(cleaned_q)
+                    if saavn_track:
+                        return {'entries': [saavn_track]}
+
+            # 3. Fallback: try YouTube extraction with fast 5s timeout
             try:
                 return extract_youtube_info(clean_search, noplaylist=not is_explicit_playlist)
             except Exception as e:
                 query = clean_search
-                title_from_oembed = None
-                author_from_oembed = None
+                if title_from_oembed:
+                    query = clean_search_query(title_from_oembed)
 
-                # If search is a YouTube URL, resolve title and author via oEmbed
-                if ("youtube.com" in clean_search or "youtu.be" in clean_search) and clean_search.startswith(("http://", "https://")):
-                    title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
-                    if title_from_oembed:
-                        query = clean_search_query(title_from_oembed)
+                print(f"[YTDL Warning] Direct YouTube extraction failed for '{clean_search}': {e}. Trying fallbacks...", flush=True)
 
-                print(f"[YTDL Warning] Direct YouTube extraction failed for '{clean_search}': {e}. Trying YouTube search for: '{query}'...", flush=True)
+                # Check JioSaavn if not checked earlier
+                saavn_track = search_saavn(query)
+                if saavn_track:
+                    return {'entries': [saavn_track]}
 
-                # 1. First fallback: YouTube search (using Android mobile client)
+                # Quick YouTube search fallback
                 try:
                     yt_search_data = extract_youtube_info(f"ytsearch1:{query}", noplaylist=True)
                     if yt_search_data and yt_search_data.get('entries'):
@@ -409,12 +423,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 except Exception as yt_err:
                     print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
 
-                # 2. Second fallback: JioSaavn (320kbps official studio audio - immune to datacenter blocks)
-                saavn_track = search_saavn(query)
-                if saavn_track:
-                    return {'entries': [saavn_track]}
-
-                # 3. Third fallback: SoundCloud search (strict filter to prevent slowed/covers)
+                # Last resort: SoundCloud search
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
                     sc_data = sc_ytdl.extract_info(f"scsearch5:{query}", download=False)
@@ -462,12 +471,23 @@ class YTDLSource(discord.PCMVolumeTransformer):
     async def get_stream_source(cls, track_info, *, loop=None):
         loop = loop or asyncio.get_event_loop()
         
+        # 1. INSTANT: If track is already from JioSaavn or has pre-resolved audio URL, start playing with 0ms delay!
+        if isinstance(track_info, dict) and track_info.get('extractor') == 'jiosaavn' and track_info.get('url'):
+            filename = track_info['url']
+            headers = track_info.get('http_headers', {})
+            user_agent = headers.get('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            dynamic_ffmpeg_options = {
+                'options': '-vn',
+                'before_options': f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 10M -analyzeduration 10M -user_agent "{user_agent}"'
+            }
+            return cls(discord.FFmpegPCMAudio(filename, **dynamic_ffmpeg_options), data=track_info)
+
         webpage_url = track_info.get('webpage_url') if isinstance(track_info, dict) else track_info
         title = track_info.get('title', webpage_url) if isinstance(track_info, dict) else webpage_url
         clean_url = clean_youtube_url(webpage_url) if isinstance(webpage_url, str) else webpage_url
         
         def _extract():
-            # If the URL is already a direct SoundCloud URL, use the SoundCloud extractor directly
+            # If the URL is already a direct SoundCloud URL
             if isinstance(clean_url, str) and 'soundcloud.com' in clean_url:
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
@@ -479,17 +499,20 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 except Exception as sc_url_err:
                     print(f"[SoundCloud Warning] Direct SoundCloud extraction failed: {sc_url_err}", flush=True)
 
-            # If track is from JioSaavn or already has a direct audio stream URL, return it directly
-            if isinstance(track_info, dict) and track_info.get('extractor') == 'jiosaavn' and track_info.get('url'):
-                return track_info
+            cleaned_title = clean_search_query(title)
 
+            # Check JioSaavn FIRST before waiting on slow YouTube retries
+            saavn_track = search_saavn(cleaned_title)
+            if saavn_track:
+                return saavn_track
+
+            # Try YouTube extraction
             try:
                 return extract_youtube_info(clean_url, noplaylist=True)
             except Exception as e:
-                cleaned_title = clean_search_query(title)
                 print(f"[YTDL Warning] Primary extraction failed for '{title}': {e}. Attempting fallback with '{cleaned_title}'...", flush=True)
 
-                # 1. Try YouTube search fallback (with Android mobile client)
+                # Quick YouTube search fallback
                 try:
                     yt_res = extract_youtube_info(f"ytsearch1:{cleaned_title}", noplaylist=True)
                     if 'entries' in yt_res and yt_res['entries']:
@@ -497,12 +520,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 except Exception as yt_err:
                     print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
 
-                # 2. Try JioSaavn fallback (320kbps official studio audio - immune to datacenter blocks)
-                saavn_track = search_saavn(cleaned_title)
-                if saavn_track:
-                    return saavn_track
-
-                # 3. Fallback to SoundCloud (strict filter against slowed/covers)
+                # Fallback to SoundCloud
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
                     res = sc_ytdl.extract_info(f"scsearch5:{cleaned_title}", download=False)
