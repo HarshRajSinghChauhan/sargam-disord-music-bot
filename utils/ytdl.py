@@ -148,6 +148,46 @@ def clean_youtube_url(url: str) -> str:
         pass
     return url
 
+def clean_youtube_query(raw_title: str, channel_author: str = '') -> str:
+    """Extract a clean, high-precision search query from a messy YouTube title."""
+    if not raw_title:
+        return ''
+    t = raw_title.strip()
+    
+    # 1. Strip bracketed noise first: (Official Video), [Lyrics], etc.
+    t = re.sub(r'[\(\[][^\)\]]*[\)\]]', ' ', t)
+    
+    # 2. Check for quoted song name like "Beete Lamhe"
+    quoted = re.findall(r'[\"“\']([^\"“\']+)[\"”\']', t)
+    
+    # 3. Strip noise words
+    noise_regex = r'\b(?:lyrical\s+video\s+song|lyrical\s+video|lyric\s+video|lyrical|lyrics|official\s+music\s+video|official\s+video\s+song|official\s+video|official\s+audio|music\s+video|video\s+song|full\s+video\s+song|full\s+video|full\s+song|full\s+audio|audio\s+song|audio\s+track|4k\s+ultra\s+hd|4k\s+hd|ultra\s+hd|1080p|remastered|video|audio|song)\b'
+    t = re.sub(noise_regex, ' ', t, flags=re.IGNORECASE)
+    
+    # 4. Strip channel branding like | T-Series ...
+    t = re.sub(r'\|\s*(?:t-series|zee\s+music|sony\s+music|yrf|tips|saregama|speed\s+records)[^|]*$', '', t, flags=re.IGNORECASE)
+    
+    # 5. Split segments by pipe or hyphen
+    segments = [s.strip() for s in re.split(r'\s*[\u2013\u2014|]\s*', t) if s.strip()]
+    
+    song_name = quoted[0].strip() if quoted and len(quoted[0].strip()) > 2 else (segments[0] if segments else t)
+    song_name = re.sub(r'[\"“”\']', '', song_name).strip()
+    
+    # Collect key context: up to 2 extra segments
+    context_words = []
+    if len(segments) > 1:
+        for s in segments[1:3]:
+            cleaned_s = re.sub(r'[\"“”\']', '', s).strip()
+            if len(cleaned_s) > 1 and len(cleaned_s.split()) <= 4:
+                context_words.append(cleaned_s)
+                
+    if context_words:
+        query = f"{song_name} {' '.join(context_words)}"
+    else:
+        query = song_name
+        
+    return ' '.join(query.split()).strip()
+
 def clean_search_query(query: str) -> str:
     """Clean video titles for better search matching on fallback extractors."""
     if not query:
@@ -389,29 +429,38 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 if saavn_track:
                     return {'entries': [saavn_track]}
 
-            # 2. For YouTube URL or direct link: try direct extraction FIRST for the exact video
+            # 2. Fast path for YouTube URL: resolve title via oEmbed and check JioSaavn FIRST with strict matching!
             title_from_oembed = None
             author_from_oembed = None
+            if is_url and ("youtube.com" in clean_search or "youtu.be" in clean_search) and not is_explicit_playlist:
+                title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
+                if title_from_oembed:
+                    smart_query = clean_youtube_query(title_from_oembed, author_from_oembed)
+                    saavn_track = search_saavn(smart_query)
+                    if saavn_track:
+                        return {'entries': [saavn_track]}
+
+            # 3. Direct YouTube extraction (for explicit playlists, or if not found on JioSaavn)
             if is_url:
                 try:
                     return extract_youtube_info(clean_search, noplaylist=not is_explicit_playlist)
                 except Exception as e:
                     print(f"[YTDL Warning] Direct YouTube extraction failed for '{clean_search}': {e}. Trying fallbacks...", flush=True)
-                    if "youtube.com" in clean_search or "youtu.be" in clean_search:
+                    if not title_from_oembed and ("youtube.com" in clean_search or "youtu.be" in clean_search):
                         title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
 
-            # 3. Fallback / search resolution path
+            # 4. Fallback / search resolution path
             if title_from_oembed:
-                query = clean_search_query(f"{title_from_oembed} {author_from_oembed or ''}")
+                query = clean_youtube_query(title_from_oembed, author_from_oembed)
             else:
-                query = clean_search_query(clean_search)
+                query = clean_youtube_query(clean_search)
 
-            # Fallback 1: Try JioSaavn with strict matching (only authentic studio matches accepted)
+            # Check JioSaavn if not checked earlier
             saavn_track = search_saavn(query)
             if saavn_track:
                 return {'entries': [saavn_track]}
 
-            # Fallback 2: YouTube search fallback
+            # YouTube search fallback
             try:
                 yt_search_data = extract_youtube_info(f"ytsearch1:{query}", noplaylist=True)
                 if yt_search_data and yt_search_data.get('entries'):
@@ -419,7 +468,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             except Exception as yt_err:
                 print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
 
-            # Fallback 3: SoundCloud search
+            # SoundCloud search fallback
             sc_ytdl = get_soundcloud_ytdl_instance()
             try:
                 sc_data = sc_ytdl.extract_info(f"scsearch5:{query}", download=False)
@@ -503,7 +552,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 except Exception as e:
                     print(f"[YTDL Warning] Direct YouTube stream extraction failed for '{title}': {e}. Trying fallbacks...", flush=True)
 
-            cleaned_title = clean_search_query(title)
+            cleaned_title = clean_youtube_query(title)
 
             # Fallback 1: Check JioSaavn with strict matching
             saavn_track = search_saavn(cleaned_title)
