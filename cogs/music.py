@@ -216,8 +216,11 @@ class Music(commands.Cog):
             if state.current.get('uploader'):
                 embed.add_field(name="Channel", value=state.current['uploader'])
             if state.current.get('duration'):
-                mins, secs = divmod(state.current['duration'], 60)
-                embed.add_field(name="Duration", value=f"{mins}:{secs:02d}")
+                total_secs = int(round(float(state.current['duration'])))
+                hours, remainder = divmod(total_secs, 3600)
+                mins, secs = divmod(remainder, 60)
+                duration_str = f"{hours}:{mins:02d}:{secs:02d}" if hours > 0 else f"{mins}:{secs:02d}"
+                embed.add_field(name="Duration", value=duration_str)
             status_text = "Paused" if state.mixer.is_music_paused() else "Playing"
             embed.set_footer(text=f"Status: {status_text} | Loop: {'Enabled' if state.loop else 'Disabled'}")
             await interaction.response.send_message(embed=embed)

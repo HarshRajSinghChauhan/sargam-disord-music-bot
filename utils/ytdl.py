@@ -506,7 +506,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             'title': data.get('title'),
             'webpage_url': data.get('webpage_url') or data.get('url'),
             'uploader': data.get('uploader'),
-            'duration': data.get('duration'),
+            'duration': int(round(float(data['duration']))) if data.get('duration') is not None else None,
             'id': data.get('id'),
             'url': data.get('url'),
             'extractor': data.get('extractor'),
