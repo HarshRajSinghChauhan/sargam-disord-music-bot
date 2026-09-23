@@ -6,117 +6,6 @@ import json
 import re
 import urllib.request
 import urllib.parse as urlparse
-
-# Suppress noise about console usage from errors
-yt_dlp.utils.bug_reports_message = lambda *args, **kwargs: ''
-
-def clean_youtube_url(url: str) -> str:
-    """Strip dynamic radio/mix/user playlist parameters if a user pasted a single video URL with a Mix attached."""
-    if not isinstance(url, str):
-        return url
-    if not ('youtube.com' in url or 'youtu.be' in url):
-        return url
-
-    try:
-        parsed = urlparse.urlparse(url)
-        qs = urlparse.parse_qs(parsed.query, keep_blank_values=True)
-        
-        video_id = qs.get('v', [None])[0]
-        list_id = qs.get('list', [None])[0]
-        
-        # If it's a youtu.be short URL
-        if not video_id and parsed.netloc in ('youtu.be', 'www.youtu.be'):
-            video_id = parsed.path.lstrip('/')
-            
-        if video_id:
-            # RD... = Radio mix, UL... = User uploads mix, LL = Liked, WL = Watch Later
-            if (list_id and list_id.startswith(('RD', 'UL', 'LL', 'WL'))) or 'start_radio' in qs:
-                return f"https://www.youtube.com/watch?v={video_id}"
-    except Exception:
-        pass
-    return url
-
-def clean_search_query(query: str) -> str:
-    """Clean video titles for better search matching on fallback extractors."""
-    if not query:
-        return ""
-    # Remove bracketed/parenthesized video meta like (Official Video), [Lyrics], (Visualizer), etc.
-    cleaned = re.sub(r'[\(\[][^\)\]]*(?:official|lyric|video|audio|visualizer|4k|hd|remix|version|prod|full song)[^\)\]]*[\)\]]', '', query, flags=re.IGNORECASE)
-    # Remove pipes and trailing channel names (e.g., "| Lyrical BAM Hindi")
-    if '|' in cleaned:
-        cleaned = cleaned.split('|')[0]
-    cleaned = ' '.join(cleaned.split()).strip()
-    return cleaned if cleaned else query
-
-def get_youtube_title_oembed(url: str):
-    """Fetch video title and author using YouTube's lightweight oEmbed endpoint (bypasses bot checks)."""
-    try:
-        oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(url, safe=':/?=&')}&format=json"
-        req = urllib.request.Request(
-            oembed_url, 
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            return data.get('title'), data.get('author_name')
-    except Exception as e:
-        print(f"[oEmbed Warning] Could not fetch oEmbed for {url}: {e}", flush=True)
-        return None, None
-
-def format_as_netscape_cookies(content):
-    if not content:
-        return ""
-        
-    content = content.replace('\\n', '\n').strip()
-    
-    # 1. Already Netscape format (contains tabs or # Netscape header)
-    if '# Netscape' in content or '\t' in content:
-        if not content.startswith('# Netscape'):
-            content = '# Netscape HTTP Cookie File\n' + content
-        return content
-        
-    # 2. JSON format (e.g., exported from EditThisCookie / Cookie-Editor)
-    if content.startswith('[') and content.endswith(']'):
-        try:
-            data = json.loads(content)
-            lines = ['# Netscape HTTP Cookie File']
-            for item in data:
-                domain = item.get('domain', '.youtube.com')
-                flag = 'TRUE' if domain.startswith('.') else 'FALSE'
-                path = item.get('path', '/')
-                secure = 'TRUE' if item.get('secure') else 'FALSE'
-                expiration = str(int(item.get('expirationDate', 2147483647)))
-                name = item.get('name', '')
-                value = item.get('value', '')
-                if name:
-                    lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expiration}\t{name}\t{value}")
-            print(f"Parsed JSON cookies into {len(lines)-1} Netscape entries", flush=True)
-            return '\n'.join(lines)
-        except Exception as e:
-            print(f"Error parsing JSON cookies: {e}", flush=True)
-
-    # 3. Header format (e.g., "SID=xxx; HSID=yyy; VISITOR_INFO1_LIVE=zzz")
-    lines = ['# Netscape HTTP Cookie File']
-    if content.lower().startswith('cookie:'):
-        content = content[7:].strip()
-    
-    pairs = content.split(';')
-    for pair in pairs:
-        if '=' in pair:
-            name, value = pair.split('=', 1)
-            name = name.strip()
-            value = value.strip()
-            if name and value:
-                lines.append(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}")
-                
-import asyncio
-import discord
-import yt_dlp
-import os
-import json
-import re
-import urllib.request
-import urllib.parse as urlparse
 from utils.saavn import search_saavn
 
 # Suppress noise about console usage from errors
@@ -141,8 +30,8 @@ def clean_youtube_url(url: str) -> str:
             video_id = parsed.path.lstrip('/')
             
         if video_id:
-            # If list is a radio mix (RD/UL/LL/WL), start_radio, or an invalid short ID (< 18 chars like PLUiHYajw3GMk)
-            if (list_id and (list_id.startswith(('RD', 'UL', 'LL', 'WL')) or len(list_id) < 18)) or 'start_radio' in qs:
+            # Only strip radio mixes (RD/UL/LL/WL, start_radio) - preserve all actual user playlists (PL...)
+            if (list_id and list_id.startswith(('RD', 'UL', 'LL', 'WL'))) or 'start_radio' in qs:
                 return f"https://www.youtube.com/watch?v={video_id}"
     except Exception:
         pass
@@ -150,59 +39,97 @@ def clean_youtube_url(url: str) -> str:
 
 META_NOISE_WORDS = {
     'official', 'video', 'song', 'songs', 'audio', 'track', 'tracks', 'music',
-    'lyric', 'lyrics', 'lyrical', 'full', 'hd', '4k', '1080p', '720p',
+    'lyric', 'lyrics', 'lyrical', 'lyrcial', 'full', 'hd', '4k', '1080p', '720p',
     'remastered', 'version', 'remix', 'mix', 'prod', 'original', 'soundtrack',
-    'love', 'romantic', 'sad', 'status', 'special', 'latest', 'new', 'hit', 'hits'
+    'love', 'romantic', 'sad', 'status', 'special', 'latest', 'new', 'hit', 'hits',
+    'best', 'top', 'popular', 'trending', 'all', 'with', 'r&b', 'late', 'night', 'virul',
+    'musicvideo', 'dance', 'feat', 'ft'
 }
 
 def is_noise_segment(seg: str) -> bool:
     cleaned = re.sub(r'\b(19|20)\d{2}\b', '', seg)
+    cleaned = re.sub(r'#\w+', '', cleaned)
     words = [w.lower() for w in re.findall(r'\w+', cleaned)]
     if not words:
         return True
     return all(w in META_NOISE_WORDS for w in words)
 
+def get_search_candidates(raw_title: str, channel_author: str = '') -> list:
+    """Generate prioritized search query candidates from a messy YouTube title."""
+    if not raw_title:
+        return []
+
+    t = raw_title.strip()
+    # Strip emojis and symbols
+    t = re.sub(r'[\U00010000-\U0010ffff]', ' ', t)
+    # Check for quoted song name like "Beete Lamhe"
+    quoted = re.findall(r'[\"“\']([^\"“\']+)[\"”\']', t)
+
+    # Strip bracketed noise: (Official Video), [Lyrics], etc.
+    t = re.sub(r'[\(\[][^\)\]]*[\)\]]', ' ', t)
+
+    # Strip noise words
+    noise_regex = r'\b(?:lyrical\s+video\s+song|lyrical\s+video|lyric\s+video|lyrcial\s+video|lyrcial|lyrical|lyrics|official\s+music\s+video|official\s+video\s+song|official\s+video|official\s+audio|music\s+video|video\s+song|full\s+video\s+song|full\s+video|full\s+song|full\s+audio|audio\s+song|audio\s+track|4k\s+ultra\s+hd|4k\s+hd|ultra\s+hd|1080p|remastered|video|audio|song|with\s+lyrics)\b'
+    t = re.sub(noise_regex, ' ', t, flags=re.IGNORECASE)
+
+    # Strip channel branding like | T-Series ...
+    t = re.sub(r'\|\s*(?:t-series|zee\s+music|sony\s+music|yrf|tips|saregama|speed\s+records|coke\s+studio\s+bharat|coke\s+studio\s+india|play\s+dmf)[^|]*$', '', t, flags=re.IGNORECASE)
+
+    # Split segments by pipe, hyphen, en-dash, or em-dash
+    raw_segs = [s.strip() for s in re.split(r'\s*[\u2013\u2014|\-]\s*', t) if s.strip()]
+    segs = []
+    for s in raw_segs:
+        # Strip trailing ft. / feat. info like 'ft. Sana Khan'
+        s_clean = re.sub(r'\b(?:ft\.?|feat\.?)\s+.*$', '', s, flags=re.IGNORECASE).strip()
+        if s_clean and not is_noise_segment(s_clean):
+            segs.append(s_clean)
+        elif not is_noise_segment(s):
+            segs.append(s)
+
+    valid_segs = [s for s in segs if not is_noise_segment(s)]
+
+    candidates = []
+
+    # Candidate 1: Quoted text (highest priority)
+    if quoted:
+        q_clean = re.sub(noise_regex, ' ', quoted[0], flags=re.IGNORECASE).strip()
+        q_clean = re.sub(r'[\"“”\']', '', q_clean).strip()
+        if len(q_clean) > 2 and not is_noise_segment(q_clean):
+            candidates.append(q_clean)
+            if len(valid_segs) > 1:
+                candidates.append(f"{q_clean} {valid_segs[1]}")
+
+    # Candidate 2: First two valid segments (e.g. "Ye Baarish Darshan Raval", "Gajendra Verma Tera Hi Rahun")
+    if len(valid_segs) >= 2:
+        candidates.append(f"{valid_segs[0]} {valid_segs[1]}")
+        candidates.append(f"{valid_segs[1]} {valid_segs[0]}")
+
+    # Candidate 3: First valid segment alone
+    if valid_segs:
+        candidates.append(valid_segs[0])
+        if len(valid_segs) > 1:
+            candidates.append(valid_segs[1])
+
+    # Candidate 4: Cleaned title without noise
+    t_clean = ' '.join(re.sub(r'[#|\-]', ' ', t).split())
+    if t_clean:
+        candidates.append(t_clean)
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_candidates = []
+    for c in candidates:
+        c_norm = ' '.join(c.split()).strip()
+        if c_norm and c_norm.lower() not in seen:
+            seen.add(c_norm.lower())
+            unique_candidates.append(c_norm)
+
+    return unique_candidates
+
 def clean_youtube_query(raw_title: str, channel_author: str = '') -> str:
     """Extract a clean, high-precision search query from a messy YouTube title."""
-    if not raw_title:
-        return ''
-    t = raw_title.strip()
-    
-    # 1. Strip bracketed noise first: (Official Video), [Lyrics], etc.
-    t = re.sub(r'[\(\[][^\)\]]*[\)\]]', ' ', t)
-    
-    # 2. Check for quoted song name like "Beete Lamhe"
-    quoted = re.findall(r'[\"“\']([^\"“\']+)[\"”\']', t)
-    
-    # 3. Strip noise words
-    noise_regex = r'\b(?:lyrical\s+video\s+song|lyrical\s+video|lyric\s+video|lyrical|lyrics|official\s+music\s+video|official\s+video\s+song|official\s+video|official\s+audio|music\s+video|video\s+song|full\s+video\s+song|full\s+video|full\s+song|full\s+audio|audio\s+song|audio\s+track|4k\s+ultra\s+hd|4k\s+hd|ultra\s+hd|1080p|remastered|video|audio|song)\b'
-    t = re.sub(noise_regex, ' ', t, flags=re.IGNORECASE)
-    
-    # 4. Strip channel branding like | T-Series ...
-    t = re.sub(r'\|\s*(?:t-series|zee\s+music|sony\s+music|yrf|tips|saregama|speed\s+records)[^|]*$', '', t, flags=re.IGNORECASE)
-    
-    # 5. Split segments by pipe or hyphen
-    segments = [s.strip() for s in re.split(r'\s*[\u2013\u2014|]\s*', t) if s.strip()]
-    
-    song_name = quoted[0].strip() if quoted and len(quoted[0].strip()) > 2 else (segments[0] if segments else t)
-    song_name = re.sub(r'[\"“”\']', '', song_name).strip()
-    
-    # Collect key context: up to 2 extra non-noise segments (artist, movie name)
-    context_words = []
-    if len(segments) > 1:
-        for s in segments[1:]:
-            cleaned_s = re.sub(r'[\"“”\']', '', s).strip()
-            if len(cleaned_s) > 1 and not is_noise_segment(cleaned_s) and len(cleaned_s.split()) <= 4:
-                context_words.append(cleaned_s)
-                if len(context_words) >= 2:
-                    break
-                
-    if context_words:
-        query = f"{song_name} {' '.join(context_words)}"
-    else:
-        query = song_name
-        
-    return ' '.join(query.split()).strip()
+    cands = get_search_candidates(raw_title, channel_author)
+    return cands[0] if cands else (raw_title or '')
 
 def clean_search_query(query: str) -> str:
     """Clean video titles for better search matching on fallback extractors."""
@@ -418,6 +345,15 @@ def is_valid_soundcloud_entry(entry, original_query: str = ""):
         if kw in title and kw not in orig_q:
             return False
 
+    # Relevance check: candidate title/uploader must share significant tokens with original_query
+    if orig_q:
+        q_words = [w for w in re.findall(r'\w+', orig_q) if w not in META_NOISE_WORDS and len(w) > 2]
+        if q_words:
+            entry_text = f"{title} {str(entry.get('uploader', '')).lower()}"
+            matched_words = [w for w in q_words if w in entry_text]
+            if len(matched_words) / len(q_words) < 0.4:
+                return False
+
     return True
 
 
@@ -450,16 +386,16 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 if saavn_track:
                     return {'entries': [saavn_track]}
 
-            # 2. Fast path for YouTube URL: resolve title via oEmbed and check JioSaavn FIRST with strict matching!
+            # 2. Fast path for YouTube URL: resolve title via oEmbed and check JioSaavn FIRST with candidates!
             title_from_oembed = None
             author_from_oembed = None
             if is_url and ("youtube.com" in clean_search or "youtu.be" in clean_search) and not is_explicit_playlist:
                 title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
                 if title_from_oembed:
-                    smart_query = clean_youtube_query(title_from_oembed, author_from_oembed)
-                    saavn_track = search_saavn(smart_query)
-                    if saavn_track:
-                        return {'entries': [saavn_track]}
+                    for cand in get_search_candidates(title_from_oembed, author_from_oembed):
+                        saavn_track = search_saavn(cand)
+                        if saavn_track:
+                            return {'entries': [saavn_track]}
 
             # 3. Direct YouTube extraction (for explicit playlists, or if not found on JioSaavn)
             if is_url:
@@ -475,10 +411,10 @@ class YTDLSource(discord.PCMVolumeTransformer):
                                 single_url = f"https://www.youtube.com/watch?v={vid}"
                                 title_from_oembed, author_from_oembed = get_youtube_title_oembed(single_url)
                                 if title_from_oembed:
-                                    smart_query = clean_youtube_query(title_from_oembed, author_from_oembed)
-                                    saavn_track = search_saavn(smart_query)
-                                    if saavn_track:
-                                        return {'entries': [saavn_track]}
+                                    for cand in get_search_candidates(title_from_oembed, author_from_oembed):
+                                        saavn_track = search_saavn(cand)
+                                        if saavn_track:
+                                            return {'entries': [saavn_track]}
                         return res
                 except Exception as e:
                     print(f"[YTDL Warning] Direct YouTube extraction failed for '{clean_search}': {e}. Trying fallbacks...", flush=True)
@@ -486,15 +422,13 @@ class YTDLSource(discord.PCMVolumeTransformer):
                         title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
 
             # 4. Fallback / search resolution path
-            if title_from_oembed:
-                query = clean_youtube_query(title_from_oembed, author_from_oembed)
-            else:
-                query = clean_youtube_query(clean_search)
+            target_title = title_from_oembed or clean_search
+            for cand in get_search_candidates(target_title, author_from_oembed):
+                saavn_track = search_saavn(cand)
+                if saavn_track:
+                    return {'entries': [saavn_track]}
 
-            # Check JioSaavn if not checked earlier
-            saavn_track = search_saavn(query)
-            if saavn_track:
-                return {'entries': [saavn_track]}
+            query = clean_youtube_query(target_title, author_from_oembed)
 
             # YouTube search fallback
             try:
@@ -578,12 +512,13 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 except Exception as e:
                     print(f"[YTDL Warning] Direct YouTube stream extraction failed for '{title}': {e}. Trying fallbacks...", flush=True)
 
-            cleaned_title = clean_youtube_query(title)
+            # Fallback 1: Check JioSaavn with prioritized candidates
+            for cand in get_search_candidates(title):
+                saavn_track = search_saavn(cand)
+                if saavn_track:
+                    return saavn_track
 
-            # Fallback 1: Check JioSaavn with strict matching
-            saavn_track = search_saavn(cleaned_title)
-            if saavn_track:
-                return saavn_track
+            cleaned_title = clean_youtube_query(title)
 
             # Fallback 2: Quick YouTube search fallback
             try:

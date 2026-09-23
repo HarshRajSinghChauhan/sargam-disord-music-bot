@@ -74,6 +74,15 @@ def is_saavn_match(query: str, song_title: str, singers: str, album: str = '') -
     overlap = len(matched) / len(q_tokens)
     return overlap >= 0.35
 
+def safe_print(msg: str):
+    try:
+        print(msg, flush=True)
+    except Exception:
+        try:
+            print(msg.encode('ascii', errors='replace').decode('ascii'), flush=True)
+        except Exception:
+            pass
+
 def decrypt_saavn_url(encrypted_url: str) -> str:
     """Decrypt JioSaavn's encrypted_media_url using DES-ECB."""
     if not encrypted_url:
@@ -85,7 +94,7 @@ def decrypt_saavn_url(encrypted_url: str) -> str:
             decrypted = cipher.decrypt(raw_bytes).decode('utf-8')
             return decrypted.strip()
     except Exception as e:
-        print(f"[JioSaavn] Decryption error: {e}", flush=True)
+        safe_print(f"[JioSaavn] Decryption error: {e}")
     return None
 
 def search_saavn(query: str):
@@ -126,7 +135,7 @@ def search_saavn(query: str):
                         stream_url = dec_url.replace('_96.mp4', '_320.mp4')
                         duration = int(s.get('duration', 0))
                         song_id = s.get('id', '')
-                        print(f"[JioSaavn] Resolved '{query}' -> '{s_title}' ({s_singers}) [320kbps]", flush=True)
+                        safe_print(f"[JioSaavn] Resolved '{query}' -> '{s_title}' ({s_singers}) [320kbps]")
                         return {
                             'title': f"{s_title} - {s_singers}" if s_singers else s_title,
                             'url': stream_url,
@@ -137,7 +146,7 @@ def search_saavn(query: str):
                             'extractor': 'jiosaavn'
                         }
     except Exception as e:
-        print(f"[JioSaavn] search.getResults failed for '{cleaned}': {e}", flush=True)
+        safe_print(f"[JioSaavn] search.getResults failed for '{cleaned}': {e}")
 
     # 2. Secondary fallback: autocomplete.get + song.getDetails
     try:
@@ -171,7 +180,7 @@ def search_saavn(query: str):
                 res_title = html.unescape(song_info.get('song') or s_title)
                 res_singers = html.unescape(song_info.get('singers') or s_singers)
                 duration = int(song_info.get('duration', 0))
-                print(f"[JioSaavn] Resolved via autocomplete '{query}' -> '{res_title}' ({res_singers}) [320kbps]", flush=True)
+                safe_print(f"[JioSaavn] Resolved via autocomplete '{query}' -> '{res_title}' ({res_singers}) [320kbps]")
                 return {
                     'title': f"{res_title} - {res_singers}" if res_singers else res_title,
                     'url': stream_url,
@@ -182,7 +191,7 @@ def search_saavn(query: str):
                     'extractor': 'jiosaavn'
                 }
     except Exception as e:
-        print(f"[JioSaavn] autocomplete.get failed for '{cleaned}': {e}", flush=True)
+        safe_print(f"[JioSaavn] autocomplete.get failed for '{cleaned}': {e}")
 
-    print(f"[JioSaavn] No verified match found for '{query}'", flush=True)
+    safe_print(f"[JioSaavn] No verified match found for '{query}'")
     return None
