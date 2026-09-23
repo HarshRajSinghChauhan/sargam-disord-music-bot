@@ -148,6 +148,20 @@ def clean_youtube_url(url: str) -> str:
         pass
     return url
 
+META_NOISE_WORDS = {
+    'official', 'video', 'song', 'songs', 'audio', 'track', 'tracks', 'music',
+    'lyric', 'lyrics', 'lyrical', 'full', 'hd', '4k', '1080p', '720p',
+    'remastered', 'version', 'remix', 'mix', 'prod', 'original', 'soundtrack',
+    'love', 'romantic', 'sad', 'status', 'special', 'latest', 'new', 'hit', 'hits'
+}
+
+def is_noise_segment(seg: str) -> bool:
+    cleaned = re.sub(r'\b(19|20)\d{2}\b', '', seg)
+    words = [w.lower() for w in re.findall(r'\w+', cleaned)]
+    if not words:
+        return True
+    return all(w in META_NOISE_WORDS for w in words)
+
 def clean_youtube_query(raw_title: str, channel_author: str = '') -> str:
     """Extract a clean, high-precision search query from a messy YouTube title."""
     if not raw_title:
@@ -173,13 +187,15 @@ def clean_youtube_query(raw_title: str, channel_author: str = '') -> str:
     song_name = quoted[0].strip() if quoted and len(quoted[0].strip()) > 2 else (segments[0] if segments else t)
     song_name = re.sub(r'[\"“”\']', '', song_name).strip()
     
-    # Collect key context: up to 2 extra segments
+    # Collect key context: up to 2 extra non-noise segments (artist, movie name)
     context_words = []
     if len(segments) > 1:
-        for s in segments[1:3]:
+        for s in segments[1:]:
             cleaned_s = re.sub(r'[\"“”\']', '', s).strip()
-            if len(cleaned_s) > 1 and len(cleaned_s.split()) <= 4:
+            if len(cleaned_s) > 1 and not is_noise_segment(cleaned_s) and len(cleaned_s.split()) <= 4:
                 context_words.append(cleaned_s)
+                if len(context_words) >= 2:
+                    break
                 
     if context_words:
         query = f"{song_name} {' '.join(context_words)}"
@@ -480,15 +496,6 @@ class YTDLSource(discord.PCMVolumeTransformer):
             except Exception as sc_err:
                 print(f"[SoundCloud Warning] SoundCloud search failed: {sc_err}", flush=True)
 
-            if title_from_oembed:
-                return {
-                    'title': title_from_oembed,
-                    'webpage_url': clean_search,
-                    'uploader': author_from_oembed or 'YouTube',
-                    'duration': 0,
-                    'id': None
-                }
-
             return {'entries': []}
 
         data = await loop.run_in_executor(None, _extract)
@@ -583,7 +590,10 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
         data = await loop.run_in_executor(None, _extract)
         
-        if 'entries' in data:
+        if not data:
+            raise Exception(f"No playable stream found for {title}")
+
+        if isinstance(data, dict) and 'entries' in data:
             if not data['entries']:
                 raise Exception(f"No stream entries found for {title}")
             data = data['entries'][0]
