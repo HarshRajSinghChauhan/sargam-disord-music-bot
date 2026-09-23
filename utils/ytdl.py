@@ -141,8 +141,8 @@ def clean_youtube_url(url: str) -> str:
             video_id = parsed.path.lstrip('/')
             
         if video_id:
-            # RD... = Radio mix, UL... = User uploads mix, LL = Liked, WL = Watch Later
-            if (list_id and list_id.startswith(('RD', 'UL', 'LL', 'WL'))) or 'start_radio' in qs:
+            # If list is a radio mix (RD/UL/LL/WL), start_radio, or an invalid short ID (< 18 chars like PLUiHYajw3GMk)
+            if (list_id and (list_id.startswith(('RD', 'UL', 'LL', 'WL')) or len(list_id) < 18)) or 'start_radio' in qs:
                 return f"https://www.youtube.com/watch?v={video_id}"
     except Exception:
         pass
@@ -406,9 +406,14 @@ def is_valid_soundcloud_entry(entry, original_query: str = ""):
     title = str(entry.get('title', '')).lower()
     orig_q = (original_query or "").lower()
 
-    # Filter out common modified/amateur tracks (slowed, reverb, raw acoustic cover)
+    # Filter out common modified/amateur tracks (slowed, reverb, raw acoustic cover, remixes, edm mashups)
     # unless the user specifically searched for those terms
-    unwanted_keywords = ['slowed', 'reverb', 'slow+reverb', 'slowed+reverb', 'acoustic cover', 'guitar cover', 'unplugged cover', 'raw']
+    unwanted_keywords = [
+        'slowed', 'reverb', 'slow+reverb', 'slowed+reverb', 
+        'acoustic cover', 'guitar cover', 'unplugged cover', 'raw',
+        'remix', 'mashup', 'edm', 'bootleg', 'bass boosted', 'bassboosted',
+        'ringtone', 'status', 'shorts'
+    ]
     for kw in unwanted_keywords:
         if kw in title and kw not in orig_q:
             return False
@@ -459,7 +464,22 @@ class YTDLSource(discord.PCMVolumeTransformer):
             # 3. Direct YouTube extraction (for explicit playlists, or if not found on JioSaavn)
             if is_url:
                 try:
-                    return extract_youtube_info(clean_search, noplaylist=not is_explicit_playlist)
+                    res = extract_youtube_info(clean_search, noplaylist=not is_explicit_playlist)
+                    if res:
+                        # If an explicit playlist returned 0 entries (e.g. invalid/deleted playlist), but has a video_id
+                        if is_explicit_playlist and ('entries' in res) and not res['entries']:
+                            parsed = urlparse.urlparse(clean_search)
+                            qs = urlparse.parse_qs(parsed.query)
+                            vid = qs.get('v', [None])[0]
+                            if vid:
+                                single_url = f"https://www.youtube.com/watch?v={vid}"
+                                title_from_oembed, author_from_oembed = get_youtube_title_oembed(single_url)
+                                if title_from_oembed:
+                                    smart_query = clean_youtube_query(title_from_oembed, author_from_oembed)
+                                    saavn_track = search_saavn(smart_query)
+                                    if saavn_track:
+                                        return {'entries': [saavn_track]}
+                        return res
                 except Exception as e:
                     print(f"[YTDL Warning] Direct YouTube extraction failed for '{clean_search}': {e}. Trying fallbacks...", flush=True)
                     if not title_from_oembed and ("youtube.com" in clean_search or "youtu.be" in clean_search):
@@ -491,8 +511,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 if sc_data and sc_data.get('entries'):
                     valid_entries = [e for e in sc_data['entries'] if is_valid_soundcloud_entry(e, query)]
                     if valid_entries:
-                        sc_data['entries'] = valid_entries
-                        return sc_data
+                        return {'entries': [valid_entries[0]]}
             except Exception as sc_err:
                 print(f"[SoundCloud Warning] SoundCloud search failed: {sc_err}", flush=True)
 
