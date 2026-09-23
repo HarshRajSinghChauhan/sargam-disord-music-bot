@@ -13,6 +13,7 @@ class GuildState:
         self.voice_client = None
         self.loop = False
         self.play_next_event = asyncio.Event()
+        self.new_song_event = asyncio.Event()
         self.player_task = None
         self.volume = 0.5
         self.mixer = AudioMixer()
@@ -34,46 +35,66 @@ class Music(commands.Cog):
                 state.player_task.cancel()
 
     async def player_loop(self, guild_id, state):
-        while True:
-            state.play_next_event.clear()
+        try:
+            while True:
+                state.play_next_event.clear()
 
-            if not state.loop or state.current is None:
-                if len(state.queue) == 0:
-                    # Queue is empty, wait for a bit before disconnecting
-                    await asyncio.sleep(300) # 5 minutes idle
-                    if len(state.queue) == 0 and state.voice_client and state.voice_client.is_connected():
-                        await state.voice_client.disconnect()
-                        del self.states[guild_id]
-                    return
-                state.current = state.queue.pop(0)
+                # 1. Fetch next song from queue or wait for one to be added
+                if not state.loop or state.current is None:
+                    while len(state.queue) == 0:
+                        state.current = None
+                        state.new_song_event.clear()
+                        try:
+                            # Wait up to 5 minutes (300s) for a new song to be queued
+                            await asyncio.wait_for(state.new_song_event.wait(), timeout=300)
+                        except asyncio.TimeoutError:
+                            # 5 minutes idle: cleanly disconnect and exit loop
+                            if state.voice_client and state.voice_client.is_connected():
+                                await state.voice_client.disconnect()
+                            if guild_id in self.states:
+                                del self.states[guild_id]
+                            return
 
-            try:
-                # Get fresh stream URL right before playing
-                source = await YTDLSource.get_stream_source(state.current, loop=self.bot.loop)
-                state.mixer.music_volume = state.volume
-            except Exception as e:
-                print(f"Error extracting stream for {state.current['title']}: {e}")
-                # Skip to next track
-                state.current = None
-                continue
+                    state.current = state.queue.pop(0)
 
-            def after_playing(error):
-                if error:
-                    print(f"Voice playback error: {error}")
-                self.bot.loop.call_soon_threadsafe(state.play_next_event.set)
+                # 2. Check voice connection
+                if state.voice_client is None or not state.voice_client.is_connected():
+                    guild = self.bot.get_guild(guild_id)
+                    if guild and guild.voice_client and guild.voice_client.is_connected():
+                        state.voice_client = guild.voice_client
+                    else:
+                        print(f"Voice client not connected for guild {guild_id}. Ending player loop.")
+                        state.current = None
+                        return
 
-            state.mixer.set_music(source, on_end=after_playing)
-            
-            if state.voice_client and not state.voice_client.is_playing():
+                # 3. Get stream source
                 try:
-                    state.voice_client.play(state.mixer)
-                except discord.ClientException:
-                    pass
-            
-            await state.play_next_event.wait()
-            
-            if not state.loop:
-                state.current = None
+                    source = await YTDLSource.get_stream_source(state.current, loop=self.bot.loop)
+                    state.mixer.music_volume = state.volume
+                except Exception as e:
+                    print(f"Error extracting stream for {state.current.get('title')}: {e}")
+                    state.current = None
+                    continue
+
+                def after_playing(error):
+                    if error:
+                        print(f"Voice playback error: {error}")
+                    self.bot.loop.call_soon_threadsafe(state.play_next_event.set)
+
+                state.mixer.set_music(source, on_end=after_playing)
+                
+                if state.voice_client and not state.voice_client.is_playing():
+                    try:
+                        state.voice_client.play(state.mixer)
+                    except discord.ClientException as ce:
+                        print(f"Voice play client exception: {ce}")
+                
+                await state.play_next_event.wait()
+                
+                if not state.loop:
+                    state.current = None
+        finally:
+            state.player_task = None
 
     async def _send(self, interaction: discord.Interaction, content: str, ephemeral: bool = True):
         if interaction.response.is_done():
@@ -88,6 +109,15 @@ class Music(commands.Cog):
             return False
 
         channel = interaction.user.voice.channel
+        guild = interaction.guild
+
+        # If already connected in guild, reuse the active voice_client
+        if guild and guild.voice_client and guild.voice_client.is_connected():
+            state.voice_client = guild.voice_client
+            if guild.voice_client.channel != channel:
+                await guild.voice_client.move_to(channel)
+            return True
+
         if state.voice_client is None or not state.voice_client.is_connected():
             try:
                 state.voice_client = await channel.connect()
@@ -125,6 +155,9 @@ class Music(commands.Cog):
             await interaction.followup.send(f"Added to queue: **{entries[0]['title']}**")
         else:
             await interaction.followup.send(f"Added {added} songs to the queue from playlist.")
+
+        # Wake up player loop immediately
+        state.new_song_event.set()
 
         if state.player_task is None or state.player_task.done():
             state.player_task = self.bot.loop.create_task(self.player_loop(interaction.guild_id, state))
@@ -169,6 +202,11 @@ class Music(commands.Cog):
         state = self.get_state(interaction.guild_id)
         state.queue.clear()
         state.loop = False
+        if state.player_task and not state.player_task.done():
+            state.player_task.cancel()
+        state.player_task = None
+        state.play_next_event.set()
+        state.new_song_event.set()
         state.mixer.stop_all()
         if state.voice_client:
             state.voice_client.stop()

@@ -156,7 +156,7 @@ class TestDatabase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.temp_dir, 'test_sargam.db')
-        self.db = Database(self.db_path)
+        self.db = Database(self.db_path, dsn="")
         await self.db.init_db()
 
     async def asyncTearDown(self):

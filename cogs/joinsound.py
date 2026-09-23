@@ -107,6 +107,12 @@ class JoinSound(commands.Cog):
                 if len(human_members) == 0:
                     # Everyone left: disconnect and clean up
                     logger.info(f"Everyone left {before.channel.name}. Auto-disconnecting.")
+                    if state.player_task and not state.player_task.done():
+                        state.player_task.cancel()
+                    state.player_task = None
+                    state.play_next_event.set()
+                    if hasattr(state, 'new_song_event'):
+                        state.new_song_event.set()
                     state.mixer.stop_all()
                     state.queue.clear()
                     state.loop = False

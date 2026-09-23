@@ -15,7 +15,7 @@ SOUNDS_DIR = os.path.join(DB_DIR, 'joinsounds')
 class Database:
     def __init__(self, db_path: str = DB_PATH, dsn: Optional[str] = None):
         self.db_path = db_path
-        self.dsn = dsn or os.getenv('DATABASE_URL')
+        self.dsn = dsn if dsn is not None else os.getenv('DATABASE_URL')
         if self.dsn and self.dsn.startswith('postgres://'):
             self.dsn = 'postgresql://' + self.dsn[11:]
         self.is_postgres = bool(self.dsn)
