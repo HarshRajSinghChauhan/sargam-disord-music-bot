@@ -54,6 +54,30 @@ def is_noise_segment(seg: str) -> bool:
         return True
     return all(w in META_NOISE_WORDS for w in words)
 
+LABEL_KEYWORDS = {
+    'series', 'music', 'records', 'studio', 'studios', 'entertainment', 'films', 'media',
+    'vevo', 'audio', 'channel', 'company', 'production', 'productions', 'official', 'zee', 'tseries'
+}
+
+def extract_expected_artist(raw_title: str, channel_author: str = '') -> str:
+    """Extract likely artist name from YouTube title segments or channel author."""
+    if channel_author:
+        author_lower = channel_author.lower()
+        if not any(kw in author_lower for kw in LABEL_KEYWORDS):
+            return channel_author
+
+    raw_segs = [s.strip() for s in re.split(r'\s*[\u2013\u2014|\-]\s*', raw_title or '') if s.strip()]
+    segs = [s for s in raw_segs if not is_noise_segment(s)]
+    if len(segs) >= 2:
+        s1_lower = segs[1].lower()
+        if not any(kw in s1_lower for kw in LABEL_KEYWORDS):
+            return segs[1]
+        s0_lower = segs[0].lower()
+        if not any(kw in s0_lower for kw in LABEL_KEYWORDS):
+            return segs[0]
+
+    return channel_author or ''
+
 def get_search_candidates(raw_title: str, channel_author: str = '') -> list:
     """Generate prioritized search query candidates from a messy YouTube title."""
     if not raw_title:
@@ -103,12 +127,9 @@ def get_search_candidates(raw_title: str, channel_author: str = '') -> list:
     if len(valid_segs) >= 2:
         candidates.append(f"{valid_segs[0]} {valid_segs[1]}")
         candidates.append(f"{valid_segs[1]} {valid_segs[0]}")
-
-    # Candidate 3: First valid segment alone
-    if valid_segs:
+    elif valid_segs:
+        # Candidate 3: Single segment ONLY if no other segment exists (never drop artist if available)
         candidates.append(valid_segs[0])
-        if len(valid_segs) > 1:
-            candidates.append(valid_segs[1])
 
     # Candidate 4: Cleaned title without noise
     t_clean = ' '.join(re.sub(r'[#|\-]', ' ', t).split())
@@ -234,8 +255,8 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
     ensure_cookies_written()
     cookies_path = 'cookies.txt'
     
-    # Default to android/ios mobile clients which bypass YouTube's datacenter IP bot detection
-    clients = player_clients or ['android', 'ios']
+    # Default to android mobile client which bypasses YouTube's datacenter IP bot detection
+    clients = player_clients or ['android']
     
     options = {
         'format': 'bestaudio/best/bestaudio*/best*',
@@ -250,7 +271,7 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
         'no_warnings': True,
         'default_search': 'auto',
         'source_address': '0.0.0.0',
-        'socket_timeout': 5,  # Fast 5s timeout to prevent hanging on dead connections
+        'socket_timeout': 10,
         'retries': 0,
         'fragment_retries': 0,
         'js_runtimes': {'node': {}, 'deno': {}},
@@ -283,11 +304,15 @@ def extract_youtube_info(target: str, noplaylist: bool = False):
     ensure_cookies_written()
     cookies_available = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
 
-    # Keep attempts fast and direct (max 2 attempts, 5s timeout each)
-    attempts = []
+    # 1. Primary: android client direct IP (fast, bypasses YouTube datacenter bot blocks, works without cookies)
+    # 2. Fallbacks: with proxy if available, or cookies with supported clients
+    attempts = [
+        {'use_cookies': False, 'use_proxy': False, 'clients': ['android'], 'desc': 'android client direct IP'}
+    ]
+    if os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY'):
+        attempts.append({'use_cookies': False, 'use_proxy': True, 'clients': ['android'], 'desc': 'android client via proxy'})
     if cookies_available:
-        attempts.append({'use_cookies': True, 'use_proxy': False, 'clients': ['android', 'ios'], 'desc': 'android client with cookies'})
-    attempts.append({'use_cookies': False, 'use_proxy': False, 'clients': ['android', 'ios'], 'desc': 'android client direct IP'})
+        attempts.append({'use_cookies': True, 'use_proxy': False, 'clients': ['web'], 'desc': 'web client with cookies'})
 
     last_err = None
     for attempt in attempts:
@@ -395,8 +420,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
             if is_url and ("youtube.com" in clean_search or "youtu.be" in clean_search) and not is_explicit_playlist:
                 title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
                 if title_from_oembed:
+                    exp_artist = extract_expected_artist(title_from_oembed, author_from_oembed)
                     for cand in get_search_candidates(title_from_oembed, author_from_oembed):
-                        saavn_track = search_saavn(cand)
+                        saavn_track = search_saavn(cand, expected_artist=exp_artist)
                         if saavn_track:
                             return {'entries': [saavn_track]}
 
@@ -414,8 +440,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
                                 single_url = f"https://www.youtube.com/watch?v={vid}"
                                 title_from_oembed, author_from_oembed = get_youtube_title_oembed(single_url)
                                 if title_from_oembed:
+                                    exp_artist = extract_expected_artist(title_from_oembed, author_from_oembed)
                                     for cand in get_search_candidates(title_from_oembed, author_from_oembed):
-                                        saavn_track = search_saavn(cand)
+                                        saavn_track = search_saavn(cand, expected_artist=exp_artist)
                                         if saavn_track:
                                             return {'entries': [saavn_track]}
                         return res
@@ -426,8 +453,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
             # 4. Fallback / search resolution path
             target_title = title_from_oembed or clean_search
+            exp_artist = extract_expected_artist(target_title, author_from_oembed)
             for cand in get_search_candidates(target_title, author_from_oembed):
-                saavn_track = search_saavn(cand)
+                saavn_track = search_saavn(cand, expected_artist=exp_artist)
                 if saavn_track:
                     return {'entries': [saavn_track]}
 
@@ -493,6 +521,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
         webpage_url = track_info.get('webpage_url') if isinstance(track_info, dict) else track_info
         title = track_info.get('title', webpage_url) if isinstance(track_info, dict) else webpage_url
+        uploader = track_info.get('uploader') if isinstance(track_info, dict) else ''
         clean_url = clean_youtube_url(webpage_url) if isinstance(webpage_url, str) else webpage_url
         
         def _extract():
@@ -515,13 +544,14 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 except Exception as e:
                     print(f"[YTDL Warning] Direct YouTube stream extraction failed for '{title}': {e}. Trying fallbacks...", flush=True)
 
-            # Fallback 1: Check JioSaavn with prioritized candidates
-            for cand in get_search_candidates(title):
-                saavn_track = search_saavn(cand)
+            # Fallback 1: Check JioSaavn with prioritized candidates AND expected artist verification!
+            expected_artist = extract_expected_artist(title, uploader)
+            for cand in get_search_candidates(title, uploader):
+                saavn_track = search_saavn(cand, expected_artist=expected_artist)
                 if saavn_track:
                     return saavn_track
 
-            cleaned_title = clean_youtube_query(title)
+            cleaned_title = clean_youtube_query(title, uploader)
 
             # Fallback 2: Quick YouTube search fallback
             try:

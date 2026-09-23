@@ -19,7 +19,7 @@ _STOPWORDS = {
     'main', 'mein', 'tu', 'ki', 'ka', 'ke', 'se', 'hai', 'ho'
 }
 
-def is_saavn_match(query: str, song_title: str, singers: str, album: str = '') -> bool:
+def is_saavn_match(query: str, song_title: str, singers: str, album: str = '', expected_artist: str = '') -> bool:
     """Verify that a JioSaavn candidate song authentically matches the query."""
     song_title = html.unescape(song_title or '')
     singers = html.unescape(singers or '')
@@ -41,6 +41,17 @@ def is_saavn_match(query: str, song_title: str, singers: str, album: str = '') -
     c_singers = [w.lower() for w in re.findall(r'\w+', singers or '') if len(w) > 2 and w.lower() not in _STOPWORDS]
     c_full = f"{song_title} {singers} {album}".lower()
     c_tokens = set(re.findall(r'\w+', c_full))
+
+    # 0. Strict Artist Verification: if an expected artist is provided, candidate must match it
+    if expected_artist:
+        exp_tokens = [w.lower() for w in re.findall(r'\w+', expected_artist) if len(w) > 2 and w.lower() not in _STOPWORDS]
+        if exp_tokens and c_singers:
+            artist_matched = any(
+                et in c_tokens or any(et.startswith(ct) or ct.startswith(et) for ct in c_tokens if min(len(et), len(ct)) >= 4)
+                for et in exp_tokens
+            )
+            if not artist_matched:
+                return False
 
     # 1. Title Similarity Check: At least one main word of candidate title must match or prefix-match query
     title_matched = any(
@@ -97,7 +108,7 @@ def decrypt_saavn_url(encrypted_url: str) -> str:
         safe_print(f"[JioSaavn] Decryption error: {e}")
     return None
 
-def search_saavn(query: str):
+def search_saavn(query: str, expected_artist: str = ''):
     """
     Search JioSaavn for an authentic studio track.
     Returns metadata and direct 320kbps/160kbps audio CDN URL.
@@ -127,7 +138,7 @@ def search_saavn(query: str):
             s_title = html.unescape(s.get('song') or s.get('title') or '')
             s_singers = html.unescape(s.get('primary_artists') or s.get('singers') or '')
             s_album = html.unescape(s.get('album') or '')
-            if is_saavn_match(cleaned, s_title, s_singers, s_album):
+            if is_saavn_match(cleaned, s_title, s_singers, s_album, expected_artist=expected_artist):
                 enc_url = s.get('encrypted_media_url')
                 if enc_url:
                     dec_url = decrypt_saavn_url(enc_url)
@@ -161,7 +172,7 @@ def search_saavn(query: str):
             more = s.get('more_info', {}) if isinstance(s.get('more_info'), dict) else {}
             s_singers = html.unescape(more.get('singers') or more.get('primary_artists') or s.get('description', ''))
             s_album = html.unescape(s.get('album') or '')
-            if is_saavn_match(cleaned, s_title, s_singers, s_album):
+            if is_saavn_match(cleaned, s_title, s_singers, s_album, expected_artist=expected_artist):
                 song_id = s.get('id')
                 if not song_id:
                     continue
