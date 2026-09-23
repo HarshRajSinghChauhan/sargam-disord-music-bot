@@ -347,11 +347,14 @@ def is_valid_soundcloud_entry(entry, original_query: str = ""):
 
     # Relevance check: candidate title/uploader must share significant tokens with original_query
     if orig_q:
-        q_words = [w for w in re.findall(r'\w+', orig_q) if w not in META_NOISE_WORDS and len(w) > 2]
+        q_words = [w for w in re.findall(r'\w+', orig_q) if w not in META_NOISE_WORDS and len(w) >= 2]
         if q_words:
             entry_text = f"{title} {str(entry.get('uploader', '')).lower()}"
+            # Primary word check: first non-noise token (core song title) must be in entry_text
+            if q_words[0] not in entry_text:
+                return False
             matched_words = [w for w in q_words if w in entry_text]
-            if len(matched_words) / len(q_words) < 0.4:
+            if len(matched_words) / len(q_words) < 0.5:
                 return False
 
     return True

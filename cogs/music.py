@@ -71,6 +71,9 @@ class Music(commands.Cog):
                 try:
                     source = await YTDLSource.get_stream_source(state.current, loop=self.bot.loop)
                     state.mixer.music_volume = state.volume
+                    if isinstance(source.data, dict):
+                        state.current.update(source.data)
+                    print(f"[Player] Guild {guild_id}: Playing '{state.current.get('title')}' via {state.current.get('extractor')} (duration: {state.current.get('duration')}s)", flush=True)
                 except Exception as e:
                     print(f"Error extracting stream for {state.current.get('title')}: {e}")
                     state.current = None
