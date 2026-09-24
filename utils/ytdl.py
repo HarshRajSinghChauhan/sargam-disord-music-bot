@@ -251,7 +251,17 @@ def ensure_cookies_written():
 # Write cookies immediately on startup if available
 ensure_cookies_written()
 
-def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_proxy: bool = False, player_clients: list = None):
+def log_proxy_status():
+    proxy_env = os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY')
+    if proxy_env:
+        masked = re.sub(r':([^:@/]+)@', ':****@', proxy_env)
+        print(f"[YTDL] Residential proxy ACTIVE: {masked}", flush=True)
+    else:
+        print("[YTDL] Notice: No YTDL_PROXY configured. Direct datacenter IP will be used.", flush=True)
+
+log_proxy_status()
+
+def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_proxy: bool = True, player_clients: list = None):
     ensure_cookies_written()
     cookies_path = 'cookies.txt'
     
@@ -303,14 +313,14 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
 def extract_youtube_info(target: str, noplaylist: bool = False):
     ensure_cookies_written()
     cookies_available = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
+    has_proxy = bool(os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY'))
 
-    # 1. Primary: android client direct IP (fast, bypasses YouTube datacenter bot blocks, works without cookies)
-    # 2. Fallbacks: with proxy if available, or cookies with supported clients
-    attempts = [
-        {'use_cookies': False, 'use_proxy': False, 'clients': ['android'], 'desc': 'android client direct IP'}
-    ]
-    if os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY'):
-        attempts.append({'use_cookies': False, 'use_proxy': True, 'clients': ['android'], 'desc': 'android client via proxy'})
+    # Prioritize residential proxy if configured
+    attempts = []
+    if has_proxy:
+        attempts.append({'use_cookies': False, 'use_proxy': True, 'clients': ['android'], 'desc': 'android client via residential proxy'})
+        attempts.append({'use_cookies': False, 'use_proxy': True, 'clients': ['web'], 'desc': 'web client via residential proxy'})
+    attempts.append({'use_cookies': False, 'use_proxy': False, 'clients': ['android'], 'desc': 'android client direct IP'})
     if cookies_available:
         attempts.append({'use_cookies': True, 'use_proxy': False, 'clients': ['web'], 'desc': 'web client with cookies'})
 
@@ -414,20 +424,10 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 if saavn_track:
                     return {'entries': [saavn_track]}
 
-            # 2. Fast path for YouTube URL: resolve title via oEmbed and check JioSaavn FIRST with candidates!
+            # 2. If it's a YouTube URL (video or playlist) -> ALWAYS EXTRACT DIRECTLY FROM YOUTUBE FIRST!
             title_from_oembed = None
             author_from_oembed = None
-            if is_url and ("youtube.com" in clean_search or "youtu.be" in clean_search) and not is_explicit_playlist:
-                title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
-                if title_from_oembed:
-                    exp_artist = extract_expected_artist(title_from_oembed, author_from_oembed)
-                    for cand in get_search_candidates(title_from_oembed, author_from_oembed):
-                        saavn_track = search_saavn(cand, expected_artist=exp_artist)
-                        if saavn_track:
-                            return {'entries': [saavn_track]}
-
-            # 3. Direct YouTube extraction (for explicit playlists, or if not found on JioSaavn)
-            if is_url:
+            if is_url and ("youtube.com" in clean_search or "youtu.be" in clean_search):
                 try:
                     res = extract_youtube_info(clean_search, noplaylist=not is_explicit_playlist)
                     if res:
@@ -438,18 +438,11 @@ class YTDLSource(discord.PCMVolumeTransformer):
                             vid = qs.get('v', [None])[0]
                             if vid:
                                 single_url = f"https://www.youtube.com/watch?v={vid}"
-                                title_from_oembed, author_from_oembed = get_youtube_title_oembed(single_url)
-                                if title_from_oembed:
-                                    exp_artist = extract_expected_artist(title_from_oembed, author_from_oembed)
-                                    for cand in get_search_candidates(title_from_oembed, author_from_oembed):
-                                        saavn_track = search_saavn(cand, expected_artist=exp_artist)
-                                        if saavn_track:
-                                            return {'entries': [saavn_track]}
+                                return extract_youtube_info(single_url, noplaylist=True)
                         return res
                 except Exception as e:
                     print(f"[YTDL Warning] Direct YouTube extraction failed for '{clean_search}': {e}. Trying fallbacks...", flush=True)
-                    if not title_from_oembed and ("youtube.com" in clean_search or "youtu.be" in clean_search):
-                        title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
+                    title_from_oembed, author_from_oembed = get_youtube_title_oembed(clean_search)
 
             # 4. Fallback / search resolution path
             target_title = title_from_oembed or clean_search
@@ -592,9 +585,12 @@ class YTDLSource(discord.PCMVolumeTransformer):
         headers = data.get('http_headers', {})
         user_agent = headers.get('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
+        proxy_url = os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY')
+        proxy_arg = f'-http_proxy "{proxy_url}" ' if proxy_url and proxy_url.startswith('http') else ''
+
         dynamic_ffmpeg_options = {
             'options': '-vn',
-            'before_options': f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 10M -analyzeduration 10M -user_agent "{user_agent}"'
+            'before_options': f'{proxy_arg}-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 10M -analyzeduration 10M -user_agent "{user_agent}"'
         }
         
         return cls(discord.FFmpegPCMAudio(filename, **dynamic_ffmpeg_options), data=data)
