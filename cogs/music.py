@@ -18,6 +18,7 @@ class GuildState:
         self.volume = 0.5
         self.mixer = AudioMixer()
         self.mixer.music_volume = self.volume
+        self.text_channel = None  # Discord channel for sending error messages
 
 class Music(commands.Cog):
     def __init__(self, bot):
@@ -35,6 +36,7 @@ class Music(commands.Cog):
                 state.player_task.cancel()
 
     async def player_loop(self, guild_id, state):
+        consecutive_failures = 0
         try:
             while True:
                 state.play_next_event.clear()
@@ -74,8 +76,31 @@ class Music(commands.Cog):
                     if isinstance(source.data, dict):
                         state.current.update(source.data)
                     print(f"[Player] Guild {guild_id}: Playing '{state.current.get('title')}' via {state.current.get('extractor')} (duration: {state.current.get('duration')}s)", flush=True)
+                    consecutive_failures = 0  # Reset on success
                 except Exception as e:
-                    print(f"Error extracting stream for {state.current.get('title')}: {e}")
+                    consecutive_failures += 1
+                    track_title = state.current.get('title', 'Unknown') if isinstance(state.current, dict) else 'Unknown'
+                    print(f"Error extracting stream for {track_title}: {e}", flush=True)
+                    
+                    # Notify user about the failure in Discord
+                    if state.text_channel:
+                        try:
+                            remaining = len(state.queue)
+                            if consecutive_failures >= 3 and remaining > 0:
+                                await state.text_channel.send(
+                                    f"⚠️ Failed to play **{track_title}** ({consecutive_failures} consecutive failures). "
+                                    f"YouTube may be blocking the bot's IP. {remaining} songs remaining in queue."
+                                )
+                            elif consecutive_failures >= 3 and remaining == 0:
+                                await state.text_channel.send(
+                                    f"❌ Could not play any songs. YouTube is blocking the bot's IP address. "
+                                    f"Try using `/play` with a JioSaavn or SoundCloud link, or a song name instead."
+                                )
+                            else:
+                                await state.text_channel.send(f"⚠️ Skipping **{track_title}** — could not get audio stream.")
+                        except Exception:
+                            pass  # Don't crash if we can't send the message
+                    
                     state.current = None
                     continue
 
@@ -140,6 +165,7 @@ class Music(commands.Cog):
             return
 
         state = self.get_state(interaction.guild_id)
+        state.text_channel = interaction.channel  # Store channel for error messages
 
         try:
             entries = await YTDLSource.create_source(interaction, search, loop=self.bot.loop)

@@ -302,6 +302,7 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
     
     # Default to android mobile client which bypasses YouTube's datacenter IP bot detection
     clients = player_clients or ['android']
+    selected_proxy = None
     
     options = {
         'format': 'bestaudio/best/bestaudio*/best*',
@@ -339,9 +340,10 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
     if use_cookies and os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
         options['cookiefile'] = cookies_path
 
-    return yt_dlp.YoutubeDL(options)
+    return yt_dlp.YoutubeDL(options), selected_proxy
 
 def extract_youtube_info(target: str, noplaylist: bool = False):
+    """Extract YouTube info. Returns (data, used_proxy) tuple."""
     ensure_cookies_written()
     cookies_available = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
     has_proxy = bool(get_proxy_list())
@@ -358,7 +360,7 @@ def extract_youtube_info(target: str, noplaylist: bool = False):
     last_err = None
     for attempt in attempts:
         try:
-            ydl = get_ytdl_instance(
+            ydl, used_proxy = get_ytdl_instance(
                 noplaylist=noplaylist,
                 use_cookies=attempt['use_cookies'],
                 use_proxy=attempt.get('use_proxy', False),
@@ -366,7 +368,7 @@ def extract_youtube_info(target: str, noplaylist: bool = False):
             )
             data = ydl.extract_info(target, download=False)
             if data:
-                return data
+                return data, used_proxy
         except Exception as err:
             last_err = err
             print(f"[YTDL] Attempt '{attempt['desc']}' failed for '{target}': {err}", flush=True)
@@ -460,7 +462,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             author_from_oembed = None
             if is_url and ("youtube.com" in clean_search or "youtu.be" in clean_search):
                 try:
-                    res = extract_youtube_info(clean_search, noplaylist=not is_explicit_playlist)
+                    res, _ = extract_youtube_info(clean_search, noplaylist=not is_explicit_playlist)
                     if res:
                         # If an explicit playlist returned 0 entries (e.g. invalid/deleted playlist), but has a video_id
                         if is_explicit_playlist and ('entries' in res) and not res['entries']:
@@ -469,7 +471,8 @@ class YTDLSource(discord.PCMVolumeTransformer):
                             vid = qs.get('v', [None])[0]
                             if vid:
                                 single_url = f"https://www.youtube.com/watch?v={vid}"
-                                return extract_youtube_info(single_url, noplaylist=True)
+                                single_res, _ = extract_youtube_info(single_url, noplaylist=True)
+                                return single_res
                         return res
                 except Exception as e:
                     print(f"[YTDL Warning] Direct YouTube extraction failed for '{clean_search}': {e}. Trying fallbacks...", flush=True)
@@ -487,7 +490,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
 
             # YouTube search fallback
             try:
-                yt_search_data = extract_youtube_info(f"ytsearch1:{query}", noplaylist=True)
+                yt_search_data, _ = extract_youtube_info(f"ytsearch1:{query}", noplaylist=True)
                 if yt_search_data and yt_search_data.get('entries'):
                     return yt_search_data
             except Exception as yt_err:
@@ -549,22 +552,25 @@ class YTDLSource(discord.PCMVolumeTransformer):
         clean_url = clean_youtube_url(webpage_url) if isinstance(webpage_url, str) else webpage_url
         
         def _extract():
+            """Returns (data, used_proxy) tuple. used_proxy is the proxy that extracted the YouTube stream URL."""
             # If the URL is already a direct SoundCloud URL
             if isinstance(clean_url, str) and 'soundcloud.com' in clean_url:
                 sc_ytdl = get_soundcloud_ytdl_instance()
                 try:
                     res = sc_ytdl.extract_info(clean_url, download=False)
                     if res and is_valid_soundcloud_entry(res, title):
-                        return res
+                        return res, None
                     if res and res.get('url'):
-                        return res
+                        return res, None
                 except Exception as sc_url_err:
                     print(f"[SoundCloud Warning] Direct SoundCloud extraction failed: {sc_url_err}", flush=True)
 
             # If it's a YouTube URL, extract audio from that exact video first!
+            yt_proxy_used = None
             if isinstance(clean_url, str) and ('youtube.com' in clean_url or 'youtu.be' in clean_url):
                 try:
-                    return extract_youtube_info(clean_url, noplaylist=True)
+                    yt_data, yt_proxy_used = extract_youtube_info(clean_url, noplaylist=True)
+                    return yt_data, yt_proxy_used
                 except Exception as e:
                     print(f"[YTDL Warning] Direct YouTube stream extraction failed for '{title}': {e}. Trying fallbacks...", flush=True)
 
@@ -573,15 +579,15 @@ class YTDLSource(discord.PCMVolumeTransformer):
             for cand in get_search_candidates(title, uploader):
                 saavn_track = search_saavn(cand, expected_artist=expected_artist)
                 if saavn_track:
-                    return saavn_track
+                    return saavn_track, None  # JioSaavn doesn't need proxy
 
             cleaned_title = clean_youtube_query(title, uploader)
 
             # Fallback 2: Quick YouTube search fallback
             try:
-                yt_res = extract_youtube_info(f"ytsearch1:{cleaned_title}", noplaylist=True)
+                yt_res, yt_search_proxy = extract_youtube_info(f"ytsearch1:{cleaned_title}", noplaylist=True)
                 if 'entries' in yt_res and yt_res['entries']:
-                    return yt_res['entries'][0]
+                    return yt_res['entries'][0], yt_search_proxy
             except Exception as yt_err:
                 print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
 
@@ -592,14 +598,16 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 if res and 'entries' in res and res['entries']:
                     valid_entries = [e for e in res['entries'] if is_valid_soundcloud_entry(e, cleaned_title)]
                     if valid_entries:
-                        return valid_entries[0]
+                        return valid_entries[0], None
                 if res and is_valid_soundcloud_entry(res, cleaned_title):
-                    return res
+                    return res, None
             except Exception as sc_err:
                 print(f"[SoundCloud Warning] SoundCloud search failed: {sc_err}", flush=True)
-                return {'entries': []}
+            
+            return None, None
 
-        data = await loop.run_in_executor(None, _extract)
+        result = await loop.run_in_executor(None, _extract)
+        data, extraction_proxy = result if result else (None, None)
         
         if not data:
             raise Exception(f"No playable stream found for {title}")
@@ -616,8 +624,14 @@ class YTDLSource(discord.PCMVolumeTransformer):
         headers = data.get('http_headers', {})
         user_agent = headers.get('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
-        proxy_url = get_random_proxy()
-        proxy_arg = f'-http_proxy "{proxy_url}" ' if proxy_url and proxy_url.startswith('http') else ''
+        # CRITICAL: Use the SAME proxy for FFmpeg that was used for yt-dlp extraction!
+        # YouTube stream URLs are IP-locked — if extracted via proxy X, FFmpeg must also use proxy X.
+        # Only apply proxy for YouTube/googlevideo URLs (JioSaavn/SoundCloud don't need it).
+        proxy_arg = ''
+        is_youtube_stream = 'googlevideo.com' in filename or 'youtube.com' in filename
+        if is_youtube_stream and extraction_proxy and extraction_proxy.startswith('http'):
+            proxy_arg = f'-http_proxy "{extraction_proxy}" '
+            print(f"[FFmpeg] Using same proxy as extraction for YouTube stream", flush=True)
 
         dynamic_ffmpeg_options = {
             'options': '-vn',
