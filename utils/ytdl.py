@@ -2,6 +2,7 @@ import asyncio
 import discord
 import yt_dlp
 import os
+import random
 import json
 import re
 import urllib.request
@@ -251,11 +252,45 @@ def ensure_cookies_written():
 # Write cookies immediately on startup if available
 ensure_cookies_written()
 
-def log_proxy_status():
+def normalize_proxy_url(proxy_str: str) -> str:
+    """Convert ip:port:user:pass or existing http://user:pass@ip:port into standard http://user:pass@ip:port."""
+    p = proxy_str.strip()
+    if not p:
+        return ""
+    if p.startswith(('http://', 'https://', 'socks5://', 'socks5h://')):
+        return p
+    parts = p.split(':')
+    if len(parts) == 4:
+        ip, port, user, password = parts
+        return f"http://{user}:{password}@{ip}:{port}"
+    elif len(parts) == 2:
+        ip, port = parts
+        return f"http://{ip}:{port}"
+    return f"http://{p}"
+
+def get_proxy_list() -> list:
     proxy_env = os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY')
-    if proxy_env:
-        masked = re.sub(r':([^:@/]+)@', ':****@', proxy_env)
-        print(f"[YTDL] Residential proxy ACTIVE: {masked}", flush=True)
+    if not proxy_env:
+        return []
+    raw_list = re.split(r'[,\n]+', proxy_env.strip())
+    clean_list = []
+    for p in raw_list:
+        p = p.strip()
+        if p:
+            norm = normalize_proxy_url(p)
+            if norm:
+                clean_list.append(norm)
+    return clean_list
+
+def get_random_proxy() -> str:
+    proxies = get_proxy_list()
+    return random.choice(proxies) if proxies else None
+
+def log_proxy_status():
+    proxies = get_proxy_list()
+    if proxies:
+        masked = [re.sub(r':([^:@/]+)@', ':****@', p) for p in proxies]
+        print(f"[YTDL] {len(proxies)} Residential proxy(ies) ACTIVE! Example: {masked[0]}", flush=True)
     else:
         print("[YTDL] Notice: No YTDL_PROXY configured. Direct datacenter IP will be used.", flush=True)
 
@@ -297,13 +332,9 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
     
     # Optional proxy support only when explicitly requested
     if use_proxy:
-        proxy_env = os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY')
-        if proxy_env:
-            proxies = [p.strip() for p in proxy_env.split(',') if p.strip()]
-            if proxies:
-                import random
-                selected_proxy = random.choice(proxies)
-                options['proxy'] = selected_proxy
+        selected_proxy = get_random_proxy()
+        if selected_proxy:
+            options['proxy'] = selected_proxy
     
     if use_cookies and os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
         options['cookiefile'] = cookies_path
@@ -313,7 +344,7 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
 def extract_youtube_info(target: str, noplaylist: bool = False):
     ensure_cookies_written()
     cookies_available = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
-    has_proxy = bool(os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY'))
+    has_proxy = bool(get_proxy_list())
 
     # Prioritize residential proxy if configured
     attempts = []
@@ -585,7 +616,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         headers = data.get('http_headers', {})
         user_agent = headers.get('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
-        proxy_url = os.getenv('YTDL_PROXY') or os.getenv('HTTP_PROXY')
+        proxy_url = get_random_proxy()
         proxy_arg = f'-http_proxy "{proxy_url}" ' if proxy_url and proxy_url.startswith('http') else ''
 
         dynamic_ffmpeg_options = {

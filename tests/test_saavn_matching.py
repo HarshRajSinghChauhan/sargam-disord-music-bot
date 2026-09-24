@@ -42,5 +42,12 @@ class TestSaavnMatching(unittest.TestCase):
         self.assertNotIn("Ye Baarish", cands)
         self.assertIn("Ye Baarish Darshan Raval", cands)
 
+    def test_proxy_normalization(self):
+        from utils.ytdl import normalize_proxy_url
+        raw = "31.59.20.176:6754:bkheueqh:3j1htg3fn4ix"
+        self.assertEqual(normalize_proxy_url(raw), "http://bkheueqh:3j1htg3fn4ix@31.59.20.176:6754")
+        already_url = "http://user:pass@1.2.3.4:8080"
+        self.assertEqual(normalize_proxy_url(already_url), already_url)
+
 if __name__ == '__main__':
     unittest.main()
