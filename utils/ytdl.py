@@ -673,9 +673,65 @@ class YTDLSource(discord.PCMVolumeTransformer):
         headers = data.get('http_headers', {})
         user_agent = headers.get('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
-        # The proxy is only needed for extraction. YouTube's CDN does not enforce IP binding 
-        # on the stream URL for the android client, so we can stream directly from Render's IP.
-        # This saves the limited proxy bandwidth and prevents 402 Payment Required proxy errors.
+        is_youtube_stream = 'googlevideo.com' in filename or 'youtube.com' in filename
+        if is_youtube_stream and extraction_proxy and extraction_proxy.startswith('http'):
+            print(f"[FFmpeg] Piping stream through python urllib to bypass FFmpeg proxy auth bugs", flush=True)
+            import urllib.request
+            import io
+            
+            class ResumableProxyStream(io.BufferedIOBase):
+                def __init__(self, url, proxy_url, ua):
+                    self.url = url
+                    self.ua = ua
+                    self.proxy_handler = urllib.request.ProxyHandler({'http': proxy_url, 'https': proxy_url})
+                    self.opener = urllib.request.build_opener(self.proxy_handler)
+                    self.position = 0
+                    self.resp = None
+                    self._connect()
+                    
+                def _connect(self):
+                    if self.resp:
+                        try: self.resp.close()
+                        except: pass
+                    req = urllib.request.Request(self.url, headers={
+                        'User-Agent': self.ua,
+                        'Range': f'bytes={self.position}-'
+                    })
+                    self.resp = self.opener.open(req)
+                    
+                def read(self, size=-1):
+                    retries = 3
+                    while retries > 0:
+                        try:
+                            data = self.resp.read(size)
+                            if data:
+                                self.position += len(data)
+                                return data
+                            else:
+                                return b'' # EOF
+                        except Exception as e:
+                            print(f"[ProxyStream] Read error: {e}. Reconnecting...", flush=True)
+                            retries -= 1
+                            if retries <= 0: return b''
+                            try: self._connect()
+                            except: pass
+                    return b''
+                    
+                def close(self):
+                    if self.resp:
+                        try: self.resp.close()
+                        except: pass
+
+            try:
+                stream = ResumableProxyStream(filename, extraction_proxy, user_agent)
+                pipe_options = {
+                    'options': '-vn',
+                    'before_options': f'-probesize 10M -analyzeduration 10M'
+                }
+                return cls(discord.FFmpegPCMAudio(stream, pipe=True, **pipe_options), data=data)
+            except Exception as e:
+                print(f"[ProxyStream] Failed to open stream via python proxy: {e}", flush=True)
+
         dynamic_ffmpeg_options = {
             'options': '-vn',
             'before_options': f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 10M -analyzeduration 10M -user_agent "{user_agent}"'
