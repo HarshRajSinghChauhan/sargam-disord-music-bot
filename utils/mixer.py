@@ -263,6 +263,10 @@ class AudioMixer(discord.AudioSource):
                     self.music_source = None
                     music_callback = self.on_music_end
                     self.on_music_end = None
+            elif self.music_source and self.music_paused:
+                # PAUSED: Return silence frame to keep discord.py's AudioPlayer alive.
+                # Returning b'' would make discord.py think audio is finished and trigger skip.
+                music_chunk = b'\x00' * self.FRAME_SIZE
 
             # If no music frame and no active overlays, playback is finished
             if not music_chunk and not has_overlays:

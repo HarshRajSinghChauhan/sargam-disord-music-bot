@@ -282,27 +282,57 @@ def get_proxy_list() -> list:
                 clean_list.append(norm)
     return clean_list
 
+_cached_proxies = None
+
+def get_ordered_proxies() -> list:
+    """Return list of proxies, keeping known-working ones first."""
+    global _cached_proxies
+    all_proxies = get_proxy_list()
+    if not all_proxies:
+        return []
+    if _cached_proxies is None:
+        _cached_proxies = list(all_proxies)
+    else:
+        for p in all_proxies:
+            if p not in _cached_proxies:
+                _cached_proxies.append(p)
+        _cached_proxies = [p for p in _cached_proxies if p in all_proxies]
+    return list(_cached_proxies)
+
+def mark_proxy_success(proxy: str):
+    """Move successfully used proxy to front of the list for instant reuse."""
+    global _cached_proxies
+    if _cached_proxies and proxy in _cached_proxies:
+        _cached_proxies.remove(proxy)
+        _cached_proxies.insert(0, proxy)
+
+def mark_proxy_failed(proxy: str):
+    """Move failing proxy to the back of the list."""
+    global _cached_proxies
+    if _cached_proxies and proxy in _cached_proxies:
+        _cached_proxies.remove(proxy)
+        _cached_proxies.append(proxy)
+
 def get_random_proxy() -> str:
-    proxies = get_proxy_list()
-    return random.choice(proxies) if proxies else None
+    proxies = get_ordered_proxies()
+    return proxies[0] if proxies else None
 
 def log_proxy_status():
     proxies = get_proxy_list()
     if proxies:
         masked = [re.sub(r':([^:@/]+)@', ':****@', p) for p in proxies]
-        print(f"[YTDL] {len(proxies)} Residential proxy(ies) ACTIVE! Example: {masked[0]}", flush=True)
+        print(f"[YTDL] {len(proxies)} Proxy(ies) configured! Example: {masked[0]}", flush=True)
     else:
         print("[YTDL] Notice: No YTDL_PROXY configured. Direct datacenter IP will be used.", flush=True)
 
 log_proxy_status()
 
-def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_proxy: bool = True, player_clients: list = None):
+def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, proxy: str = None, player_clients: list = None):
     ensure_cookies_written()
     cookies_path = 'cookies.txt'
     
     # Default to android mobile client which bypasses YouTube's datacenter IP bot detection
     clients = player_clients or ['android']
-    selected_proxy = None
     
     options = {
         'format': 'bestaudio/best/bestaudio*/best*',
@@ -317,7 +347,7 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
         'no_warnings': True,
         'default_search': 'auto',
         'source_address': '0.0.0.0',
-        'socket_timeout': 10,
+        'socket_timeout': 8,
         'retries': 0,
         'fragment_retries': 0,
         'js_runtimes': {'node': {}, 'deno': {}},
@@ -331,47 +361,71 @@ def get_ytdl_instance(noplaylist: bool = False, use_cookies: bool = True, use_pr
         }
     }
     
-    # Optional proxy support only when explicitly requested
-    if use_proxy:
-        selected_proxy = get_random_proxy()
-        if selected_proxy:
-            options['proxy'] = selected_proxy
+    if proxy:
+        options['proxy'] = proxy
     
     if use_cookies and os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
         options['cookiefile'] = cookies_path
 
-    return yt_dlp.YoutubeDL(options), selected_proxy
+    return yt_dlp.YoutubeDL(options), proxy
 
 def extract_youtube_info(target: str, noplaylist: bool = False):
-    """Extract YouTube info. Returns (data, used_proxy) tuple."""
+    """Extract YouTube info with multi-proxy automatic failover. Returns (data, used_proxy) tuple."""
     ensure_cookies_written()
     cookies_available = os.path.exists('cookies.txt') and os.path.getsize('cookies.txt') > 0
-    has_proxy = bool(get_proxy_list())
-
-    # Prioritize residential proxy if configured
-    attempts = []
-    if has_proxy:
-        attempts.append({'use_cookies': False, 'use_proxy': True, 'clients': ['android'], 'desc': 'android client via residential proxy'})
-        attempts.append({'use_cookies': False, 'use_proxy': True, 'clients': ['web'], 'desc': 'web client via residential proxy'})
-    attempts.append({'use_cookies': False, 'use_proxy': False, 'clients': ['android'], 'desc': 'android client direct IP'})
-    if cookies_available:
-        attempts.append({'use_cookies': True, 'use_proxy': False, 'clients': ['web'], 'desc': 'web client with cookies'})
+    proxies = get_ordered_proxies()
 
     last_err = None
-    for attempt in attempts:
+
+    # Step 1: Try each proxy with the android client (which bypasses bot check on good IPs)
+    for p in proxies:
+        masked = re.sub(r':([^:@/]+)@', ':****@', p)
         try:
-            ydl, used_proxy = get_ytdl_instance(
+            ydl, _ = get_ytdl_instance(
                 noplaylist=noplaylist,
-                use_cookies=attempt['use_cookies'],
-                use_proxy=attempt.get('use_proxy', False),
-                player_clients=attempt.get('clients')
+                use_cookies=False,
+                proxy=p,
+                player_clients=['android']
             )
             data = ydl.extract_info(target, download=False)
             if data:
-                return data, used_proxy
+                mark_proxy_success(p)
+                return data, p
         except Exception as err:
             last_err = err
-            print(f"[YTDL] Attempt '{attempt['desc']}' failed for '{target}': {err}", flush=True)
+            mark_proxy_failed(p)
+            print(f"[YTDL] Proxy {masked} failed for '{target}': {str(err).splitlines()[0]}", flush=True)
+
+    # Step 2: Direct IP with android client (works if running locally or on unblocked server)
+    try:
+        ydl, _ = get_ytdl_instance(
+            noplaylist=noplaylist,
+            use_cookies=False,
+            proxy=None,
+            player_clients=['android']
+        )
+        data = ydl.extract_info(target, download=False)
+        if data:
+            return data, None
+    except Exception as err:
+        last_err = err
+        print(f"[YTDL] Direct IP android client failed for '{target}': {str(err).splitlines()[0]}", flush=True)
+
+    # Step 3: Web client with cookies (if available)
+    if cookies_available:
+        try:
+            ydl, _ = get_ytdl_instance(
+                noplaylist=noplaylist,
+                use_cookies=True,
+                proxy=None,
+                player_clients=['web']
+            )
+            data = ydl.extract_info(target, download=False)
+            if data:
+                return data, None
+        except Exception as err:
+            last_err = err
+            print(f"[YTDL] Web client with cookies failed for '{target}': {str(err).splitlines()[0]}", flush=True)
 
     raise last_err or Exception(f"Failed to extract YouTube info for {target}")
 
@@ -565,11 +619,12 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 except Exception as sc_url_err:
                     print(f"[SoundCloud Warning] Direct SoundCloud extraction failed: {sc_url_err}", flush=True)
 
-            # If it's a YouTube URL, extract audio from that exact video first!
+            # PRIORITY 1: If it's a YouTube URL -> ALWAYS EXTRACT DIRECT AUDIO FROM THAT EXACT YOUTUBE VIDEO FIRST!
             yt_proxy_used = None
             if isinstance(clean_url, str) and ('youtube.com' in clean_url or 'youtu.be' in clean_url):
                 try:
                     yt_data, yt_proxy_used = extract_youtube_info(clean_url, noplaylist=True)
+                    print(f"[Stream] Resolved via YouTube direct: '{title}'", flush=True)
                     return yt_data, yt_proxy_used
                 except Exception as e:
                     print(f"[YTDL Warning] Direct YouTube stream extraction failed for '{title}': {e}. Trying fallbacks...", flush=True)
@@ -579,25 +634,19 @@ class YTDLSource(discord.PCMVolumeTransformer):
             for cand in get_search_candidates(title, uploader):
                 saavn_track = search_saavn(cand, expected_artist=expected_artist)
                 if saavn_track:
-                    return saavn_track, None  # JioSaavn doesn't need proxy
+                    print(f"[Stream] Fallback to JioSaavn: '{title}' -> '{saavn_track.get('title')}'", flush=True)
+                    return saavn_track, None
 
             cleaned_title = clean_youtube_query(title, uploader)
 
-            # Fallback 2: Quick YouTube search fallback
-            try:
-                yt_res, yt_search_proxy = extract_youtube_info(f"ytsearch1:{cleaned_title}", noplaylist=True)
-                if 'entries' in yt_res and yt_res['entries']:
-                    return yt_res['entries'][0], yt_search_proxy
-            except Exception as yt_err:
-                print(f"[YTDL Warning] YouTube search fallback failed: {yt_err}", flush=True)
-
-            # Fallback 3: Fallback to SoundCloud
+            # PRIORITY 3: SoundCloud search
             sc_ytdl = get_soundcloud_ytdl_instance()
             try:
                 res = sc_ytdl.extract_info(f"scsearch5:{cleaned_title}", download=False)
                 if res and 'entries' in res and res['entries']:
                     valid_entries = [e for e in res['entries'] if is_valid_soundcloud_entry(e, cleaned_title)]
                     if valid_entries:
+                        print(f"[Stream] Resolved via SoundCloud: '{title}' -> '{valid_entries[0].get('title')}'", flush=True)
                         return valid_entries[0], None
                 if res and is_valid_soundcloud_entry(res, cleaned_title):
                     return res, None
