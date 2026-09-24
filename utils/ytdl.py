@@ -673,18 +673,12 @@ class YTDLSource(discord.PCMVolumeTransformer):
         headers = data.get('http_headers', {})
         user_agent = headers.get('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
-        # CRITICAL: Use the SAME proxy for FFmpeg that was used for yt-dlp extraction!
-        # YouTube stream URLs are IP-locked — if extracted via proxy X, FFmpeg must also use proxy X.
-        # Only apply proxy for YouTube/googlevideo URLs (JioSaavn/SoundCloud don't need it).
-        proxy_arg = ''
-        is_youtube_stream = 'googlevideo.com' in filename or 'youtube.com' in filename
-        if is_youtube_stream and extraction_proxy and extraction_proxy.startswith('http'):
-            proxy_arg = f'-http_proxy "{extraction_proxy}" '
-            print(f"[FFmpeg] Using same proxy as extraction for YouTube stream", flush=True)
-
+        # The proxy is only needed for extraction. YouTube's CDN does not enforce IP binding 
+        # on the stream URL for the android client, so we can stream directly from Render's IP.
+        # This saves the limited proxy bandwidth and prevents 402 Payment Required proxy errors.
         dynamic_ffmpeg_options = {
             'options': '-vn',
-            'before_options': f'{proxy_arg}-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 10M -analyzeduration 10M -user_agent "{user_agent}"'
+            'before_options': f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 10M -analyzeduration 10M -user_agent "{user_agent}"'
         }
         
         return cls(discord.FFmpegPCMAudio(filename, **dynamic_ffmpeg_options), data=data)
