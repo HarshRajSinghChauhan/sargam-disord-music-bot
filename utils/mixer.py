@@ -104,21 +104,17 @@ class AudioMixer(discord.AudioSource):
         return False
 
     def has_music(self) -> bool:
-        with self._lock:
-            return self.music_source is not None
+        return self.music_source is not None
 
     def is_music_paused(self) -> bool:
-        with self._lock:
-            return self.music_paused
+        return self.music_paused
 
     def has_overlays(self) -> bool:
-        with self._lock:
-            return len(self.overlays) > 0
+        return len(self.overlays) > 0
 
     def is_active(self) -> bool:
         """Returns True if either music or at least one overlay is currently playing."""
-        with self._lock:
-            return (self.music_source is not None and not self.music_paused) or len(self.overlays) > 0
+        return (self.music_source is not None and not self.music_paused) or len(self.overlays) > 0
 
     def set_music(self, source: discord.AudioSource, on_end: Optional[Callable] = None):
         """Set or replace the current primary music track."""
@@ -202,85 +198,98 @@ class AudioMixer(discord.AudioSource):
         music_callback = None
         mixed_buffer = b''
 
+        # Extract references under lock
         with self._lock:
-            # 1. Read and collect active overlays first
-            remaining_overlays = []
-            overlay_chunks = []
-            ducking_active = False
+            current_overlays = list(self.overlays)
+            music_source = self.music_source
+            music_paused = self.music_paused
+            duck_volume = self.duck_volume
+            music_volume = self.music_volume
+            pause_resume_mode = self.pause_resume_mode
 
-            for ov in self.overlays:
-                ov_data = ov.read()
-                if ov_data:
-                    # Pad to FRAME_SIZE if shorter
-                    if len(ov_data) < self.FRAME_SIZE:
-                        ov_data = ov_data + b'\x00' * (self.FRAME_SIZE - len(ov_data))
-                    scaled_ov = pcm_mul(ov_data, ov.volume)
-                    overlay_chunks.append(scaled_ov)
-                    remaining_overlays.append(ov)
-                    if ov.duck_music:
-                        ducking_active = True
-                else:
-                    ov.cleanup()
+        # 1. Read and collect active overlays first (OUTSIDE lock)
+        remaining_overlays = []
+        overlay_chunks = []
+        ducking_active = False
 
-            self.overlays = remaining_overlays
+        for ov in current_overlays:
+            ov_data = ov.read()
+            if ov_data:
+                # Pad to FRAME_SIZE if shorter
+                if len(ov_data) < self.FRAME_SIZE:
+                    ov_data = ov_data + b'\x00' * (self.FRAME_SIZE - len(ov_data))
+                scaled_ov = pcm_mul(ov_data, ov.volume)
+                overlay_chunks.append(scaled_ov)
+                remaining_overlays.append(ov)
+                if ov.duck_music:
+                    ducking_active = True
+            else:
+                ov.cleanup()
+
+        # Update remaining overlays under lock
+        with self._lock:
+            # Only keep overlays that are both in current overlays AND remaining
+            self.overlays = [ov for ov in self.overlays if ov in remaining_overlays]
             has_overlays = len(overlay_chunks) > 0
 
-            # Determine whether music should be paused or ducked
-            duck_factor = 1.0
-            if has_overlays:
-                if self.pause_resume_mode:
-                    # In pause-and-resume fallback mode, do not read music frame
-                    duck_factor = 0.0
-                elif ducking_active:
-                    duck_factor = self.duck_volume
+        # Determine whether music should be paused or ducked
+        duck_factor = 1.0
+        if has_overlays:
+            if pause_resume_mode:
+                # In pause-and-resume fallback mode, do not read music frame
+                duck_factor = 0.0
+            elif ducking_active:
+                duck_factor = duck_volume
 
-            # 2. Read music frame
-            music_chunk = b''
-            if self.music_source and not self.music_paused and duck_factor > 0.0:
-                try:
-                    raw_music = self.music_source.read()
-                    if raw_music:
+        # 2. Read music frame (OUTSIDE lock)
+        music_chunk = b''
+        music_ended = False
+        
+        if music_source and not music_paused and duck_factor > 0.0:
+            try:
+                raw_music = music_source.read()
+                if raw_music:
+                    with self._lock:
                         self._empty_music_frames = 0
-                        effective_vol = self.music_volume * duck_factor
-                        music_chunk = pcm_mul(raw_music, effective_vol)
-                        if len(music_chunk) < self.FRAME_SIZE:
-                            music_chunk = music_chunk + b'\x00' * (self.FRAME_SIZE - len(music_chunk))
-                    else:
-                        # Music track truly ended
-                        try:
-                            self.music_source.cleanup()
-                        except Exception:
-                            pass
-                        self.music_source = None
-                        music_callback = self.on_music_end
-                        self.on_music_end = None
-                except Exception as e:
-                    logger.error(f"Error reading music stream: {e}")
-                    try:
-                        self.music_source.cleanup()
-                    except Exception:
-                        pass
+                    effective_vol = music_volume * duck_factor
+                    music_chunk = pcm_mul(raw_music, effective_vol)
+                    if len(music_chunk) < self.FRAME_SIZE:
+                        music_chunk = music_chunk + b'\x00' * (self.FRAME_SIZE - len(music_chunk))
+                else:
+                    music_ended = True
+            except Exception as e:
+                logger.error(f"Error reading music stream: {e}")
+                music_ended = True
+        elif music_source and music_paused:
+            # PAUSED: Return silence frame to keep discord.py's AudioPlayer alive.
+            music_chunk = b'\x00' * self.FRAME_SIZE
+
+        # Cleanup if music ended
+        if music_ended:
+            try:
+                music_source.cleanup()
+            except Exception:
+                pass
+            with self._lock:
+                # Only clear if it hasn't been replaced by a new track while we were unlocked
+                if self.music_source is music_source:
                     self.music_source = None
                     music_callback = self.on_music_end
                     self.on_music_end = None
-            elif self.music_source and self.music_paused:
-                # PAUSED: Return silence frame to keep discord.py's AudioPlayer alive.
-                # Returning b'' would make discord.py think audio is finished and trigger skip.
-                music_chunk = b'\x00' * self.FRAME_SIZE
 
-            # If no music frame and no active overlays, playback is finished
-            if not music_chunk and not has_overlays:
-                if music_callback:
-                    try:
-                        music_callback(None)
-                    except Exception as e:
-                        logger.error(f"Error in music on_end callback: {e}")
-                return b''
+        # If no music frame and no active overlays, playback is finished
+        if not music_chunk and not has_overlays:
+            if music_callback:
+                try:
+                    music_callback(None)
+                except Exception as e:
+                    logger.error(f"Error in music on_end callback: {e}")
+            return b''
 
-            # 3. Mix streams together
-            mixed_buffer = music_chunk if music_chunk else (b'\x00' * self.FRAME_SIZE)
-            for ov_chunk in overlay_chunks:
-                mixed_buffer = pcm_add(mixed_buffer, ov_chunk)
+        # 3. Mix streams together
+        mixed_buffer = music_chunk if music_chunk else (b'\x00' * self.FRAME_SIZE)
+        for ov_chunk in overlay_chunks:
+            mixed_buffer = pcm_add(mixed_buffer, ov_chunk)
 
         # If music ended while overlays are still playing, fire music callback outside the lock
         if music_callback:

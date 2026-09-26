@@ -697,7 +697,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                         'User-Agent': self.ua,
                         'Range': f'bytes={self.position}-'
                     })
-                    self.resp = self.opener.open(req)
+                    self.resp = self.opener.open(req, timeout=10)
                     
                 def read(self, size=-1):
                     retries = 3
