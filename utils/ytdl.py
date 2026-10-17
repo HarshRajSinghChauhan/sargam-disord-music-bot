@@ -680,9 +680,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
             import io
             
             class ResumableProxyStream(io.BufferedIOBase):
-                def __init__(self, url, proxy_url, ua):
+                def __init__(self, url, proxy_url, headers):
                     self.url = url
-                    self.ua = ua
+                    self.headers = headers or {}
                     self.proxy_handler = urllib.request.ProxyHandler({'http': proxy_url, 'https': proxy_url})
                     self.opener = urllib.request.build_opener(self.proxy_handler)
                     self.position = 0
@@ -693,10 +693,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
                     if self.resp:
                         try: self.resp.close()
                         except: pass
-                    req = urllib.request.Request(self.url, headers={
-                        'User-Agent': self.ua,
-                        'Range': f'bytes={self.position}-'
-                    })
+                    req_headers = dict(self.headers)
+                    req_headers['Range'] = f'bytes={self.position}-'
+                    req = urllib.request.Request(self.url, headers=req_headers)
                     self.resp = self.opener.open(req, timeout=10)
                     
                 def read(self, size=-1):
@@ -723,7 +722,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                         except: pass
 
             try:
-                stream = ResumableProxyStream(filename, extraction_proxy, user_agent)
+                stream = ResumableProxyStream(filename, extraction_proxy, headers)
                 pipe_options = {
                     'options': '-vn',
                     'before_options': f'-probesize 10M -analyzeduration 10M'
@@ -731,6 +730,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 return cls(discord.FFmpegPCMAudio(stream, pipe=True, **pipe_options), data=data)
             except Exception as e:
                 print(f"[ProxyStream] Failed to open stream via python proxy: {e}", flush=True)
+                raise e
 
         dynamic_ffmpeg_options = {
             'options': '-vn',
