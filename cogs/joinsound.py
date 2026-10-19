@@ -400,14 +400,17 @@ class JoinSound(commands.Cog):
             )
             return
 
+        # Defer immediately to allow time for voice handshake and audio setup
+        await interaction.response.defer(ephemeral=False)
+
         sound = await db.get_join_sound(interaction.guild_id, target_user.id)
         if not sound:
             msg = "ℹ️ No custom join sound is configured for you." if target_user.id == interaction.user.id else f"ℹ️ No custom join sound is configured for **{target_user.display_name}**."
-            await interaction.response.send_message(msg, ephemeral=True)
+            await interaction.followup.send(msg)
             return
 
         if not os.path.exists(sound['sound_path']):
-            await interaction.response.send_message("❌ The sound file could not be found on the server.", ephemeral=True)
+            await interaction.followup.send("❌ The sound file could not be found on the server.")
             return
 
         state = self._get_music_state(interaction.guild_id)
@@ -417,13 +420,13 @@ class JoinSound(commands.Cog):
         if state.voice_client is None or not state.voice_client.is_connected():
             perms = channel.permissions_for(interaction.guild.me)
             if not (perms.connect and perms.speak):
-                await interaction.response.send_message("❌ Bot lacks Connect or Speak permissions in your voice channel.", ephemeral=True)
+                await interaction.followup.send("❌ Bot lacks Connect or Speak permissions in your voice channel.")
                 return
             try:
-                state.voice_client = await channel.connect()
+                state.voice_client = await channel.connect(timeout=10.0)
                 self._schedule_idle_check(interaction.guild_id, channel, delay=120)
             except Exception as e:
-                await interaction.response.send_message(f"❌ Could not connect to voice channel: {e}", ephemeral=True)
+                await interaction.followup.send(f"❌ Could not connect to voice channel: {e}")
                 return
         elif state.voice_client.channel != channel:
             # If not playing music, move to caller channel
@@ -446,10 +449,10 @@ class JoinSound(commands.Cog):
                 except discord.ClientException:
                     pass
 
-            await interaction.response.send_message(f"🔊 Playing join sound for **{target_user.display_name}** (`{sound['sound_name']}`).")
+            await interaction.followup.send(f"🔊 Playing join sound for **{target_user.display_name}** (`{sound['sound_name']}`).")
         except Exception as e:
             logger.error(f"Error testing join sound: {e}")
-            await interaction.response.send_message(f"❌ Error playing join sound: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Error playing join sound: {e}")
 
     @app_commands.command(name="joinsoundconfig", description="Configure join sound settings for this server (Admin only)")
     @app_commands.describe(
