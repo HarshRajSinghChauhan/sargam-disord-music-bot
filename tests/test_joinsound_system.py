@@ -273,15 +273,15 @@ class TestAudioValidation(unittest.TestCase):
         return path
 
     def test_valid_short_audio(self):
-        wav_path = self._create_synthetic_wav("short.wav", duration_sec=3.0)
-        is_valid, err, duration = validate_audio_file(wav_path, max_duration=10.0)
+        wav_path = self._create_synthetic_wav("short.wav", duration_sec=15.0)
+        is_valid, err, duration = validate_audio_file(wav_path)
         self.assertTrue(is_valid)
         self.assertIsNone(err)
-        self.assertAlmostEqual(duration, 3.0, delta=0.1)
+        self.assertAlmostEqual(duration, 15.0, delta=0.1)
 
     def test_excessive_duration_audio_rejected(self):
-        wav_path = self._create_synthetic_wav("long.wav", duration_sec=15.0)
-        is_valid, err, duration = validate_audio_file(wav_path, max_duration=10.0)
+        wav_path = self._create_synthetic_wav("long.wav", duration_sec=25.0)
+        is_valid, err, duration = validate_audio_file(wav_path)
         self.assertFalse(is_valid)
         self.assertIn("exceeds the maximum limit", err)
 
@@ -289,7 +289,7 @@ class TestAudioValidation(unittest.TestCase):
         corrupt_path = os.path.join(self.temp_dir, "corrupt.mp3")
         with open(corrupt_path, "wb") as f:
             f.write(b"NOT_REAL_AUDIO_DATA_GARBAGE")
-        is_valid, err, duration = validate_audio_file(corrupt_path, max_duration=10.0)
+        is_valid, err, duration = validate_audio_file(corrupt_path)
         self.assertFalse(is_valid)
 
 

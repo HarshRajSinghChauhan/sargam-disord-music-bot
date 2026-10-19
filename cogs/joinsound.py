@@ -19,7 +19,7 @@ ALLOWED_MIME_TYPES = {
     'audio/ogg', 'application/ogg', 'audio/vorbis'
 }
 MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
-MAX_DURATION_SECONDS = 10.0           # 10 seconds max duration
+MAX_DURATION_SECONDS = 20.0           # 20 seconds max duration
 
 
 def validate_audio_file(file_path: str, max_duration: float = MAX_DURATION_SECONDS) -> Tuple[bool, Optional[str], float]:
@@ -215,7 +215,7 @@ class JoinSound(commands.Cog):
 
     @app_commands.command(name="setjoinsound", description="Assign a custom voice channel join sound")
     @app_commands.describe(
-        sound="The audio file to play when joining (MP3, WAV, or OGG, max 10s & 5MB)",
+        sound="The audio file to play when joining (MP3, WAV, or OGG, max 20s & 5MB)",
         user="(Optional) Member to assign sound to. Requires Manage Server permission if not yourself",
         volume="(Optional) Playback volume from 1% to 100% (default: 50%)",
         enabled="(Optional) Whether this join sound is active (default: True)"

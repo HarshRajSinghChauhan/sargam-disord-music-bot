@@ -59,7 +59,7 @@ docker-compose down
 - `/loop`: Toggle looping for the current track.
 
 ### Custom Join Sound Commands
-- `/setjoinsound [sound] [user] [volume] [enabled]`: Assign a custom sound (MP3/WAV/OGG, max 10s) to play when you (or another member, if admin) join a voice channel.
+- `/setjoinsound [sound] [user] [volume] [enabled]`: Assign a custom sound (MP3/WAV/OGG, max 20s) to play when you (or another member, if admin) join a voice channel.
 - `/removejoinsound [user]`: Remove the assigned join sound.
 - `/myjoinsound`: View your currently assigned join sound details.
 - `/joinsounds [page]`: View all configured join sounds in this server.
