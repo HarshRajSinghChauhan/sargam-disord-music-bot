@@ -12,6 +12,9 @@ echo.
 :: Mark this node as the local laptop
 set BOT_NODE=laptop
 
+:: Ensure local ffmpeg is in PATH
+set PATH=%~dp0;C:\Users\harsh\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.2-full_build\bin;%PATH%
+
 :: Clear YTDL_PROXY so local machine uses direct home internet (no proxy blocks/limits)
 set YTDL_PROXY=
 
