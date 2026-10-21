@@ -58,6 +58,11 @@ class Database:
                             auto_connect INTEGER NOT NULL DEFAULT 1,
                             enabled INTEGER NOT NULL DEFAULT 1
                         );
+
+                        CREATE TABLE IF NOT EXISTS cluster_heartbeat (
+                            node TEXT PRIMARY KEY,
+                            last_heartbeat TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                        );
                     """)
                 logger.info("Connected to Neon / PostgreSQL and verified schema.")
                 return
@@ -103,6 +108,12 @@ class Database:
                     duck_volume REAL NOT NULL DEFAULT 0.25,
                     auto_connect INTEGER NOT NULL DEFAULT 1,
                     enabled INTEGER NOT NULL DEFAULT 1
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS cluster_heartbeat (
+                    node TEXT PRIMARY KEY,
+                    last_heartbeat TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             conn.commit()
@@ -356,6 +367,92 @@ class Database:
             'auto_connect': new_auto,
             'enabled': new_enabled
         }
+
+    # ==================== CLUSTER & ACTIVE NODE COORDINATION ====================
+
+    async def update_heartbeat(self, node: str):
+        """Update or insert active heartbeat for this node."""
+        if self.is_postgres:
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute("""
+                        INSERT INTO cluster_heartbeat (node, last_heartbeat)
+                        VALUES ($1, CURRENT_TIMESTAMP)
+                        ON CONFLICT (node) DO UPDATE SET last_heartbeat = CURRENT_TIMESTAMP;
+                    """, node)
+                return
+            except Exception as e:
+                logger.error(f"Failed to update cluster heartbeat on Postgres: {e}")
+                return
+
+        def _sync():
+            try:
+                with self._get_sqlite_connection() as conn:
+                    conn.execute("""
+                        INSERT INTO cluster_heartbeat (node, last_heartbeat)
+                        VALUES (?, datetime('now'))
+                        ON CONFLICT(node) DO UPDATE SET last_heartbeat = datetime('now');
+                    """, (node,))
+                    conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to update cluster heartbeat on SQLite: {e}")
+
+        await asyncio.to_thread(_sync)
+
+    async def is_node_active(self, node: str, timeout_seconds: int = 20) -> bool:
+        """Check if a specific node has sent a heartbeat within the timeout window."""
+        if self.is_postgres:
+            try:
+                async with self.pool.acquire() as conn:
+                    row = await conn.fetchrow("""
+                        SELECT EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_heartbeat)) as diff
+                        FROM cluster_heartbeat WHERE node = $1;
+                    """, node)
+                    if row and row['diff'] is not None:
+                        return float(row['diff']) < timeout_seconds
+                    return False
+            except Exception as e:
+                logger.error(f"Failed to query node activity on Postgres: {e}")
+                return False
+
+        def _sync():
+            try:
+                with self._get_sqlite_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT (strftime('%s', 'now') - strftime('%s', last_heartbeat)) as diff
+                        FROM cluster_heartbeat WHERE node = ?;
+                    """, (node,))
+                    row = cursor.fetchone()
+                    if row and row['diff'] is not None:
+                        return float(row['diff']) < timeout_seconds
+                    return False
+            except Exception as e:
+                logger.error(f"Failed to query node activity on SQLite: {e}")
+                return False
+
+        return await asyncio.to_thread(_sync)
+
+    async def clear_heartbeat(self, node: str):
+        """Delete heartbeat when node is shutting down cleanly."""
+        if self.is_postgres:
+            try:
+                async with self.pool.acquire() as conn:
+                    await conn.execute("DELETE FROM cluster_heartbeat WHERE node = $1;", node)
+                return
+            except Exception as e:
+                logger.error(f"Failed to clear cluster heartbeat on Postgres: {e}")
+                return
+
+        def _sync():
+            try:
+                with self._get_sqlite_connection() as conn:
+                    conn.execute("DELETE FROM cluster_heartbeat WHERE node = ?;", (node,))
+                    conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to clear cluster heartbeat on SQLite: {e}")
+
+        await asyncio.to_thread(_sync)
 
 
 # Global singleton instance

@@ -44,6 +44,12 @@ To stop the bot:
 docker-compose down
 ```
 
+### 4. Smart Local Mode (Run on Laptop with 0 Proxies)
+When you are on your laptop, you can run the bot locally to play music directly using your home Wi-Fi (zero proxy limits and zero YouTube bot blocks):
+1. Simply double-click `start_local.bat` on your computer.
+2. The Cloud instance (Render) will automatically detect your laptop, yield its connection, and enter **Standby Mode**.
+3. When you close or turn off your laptop, Render automatically takes over within 15–20 seconds with proxies enabled for your friends.
+
 ## Slash Commands
 - `/play [url or search]`: Play a song or playlist.
 - `/pause`: Pause the current song.
