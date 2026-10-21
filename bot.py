@@ -59,6 +59,8 @@ class MusicBot(commands.Bot):
         print("Loaded extension: cogs.music")
         await self.load_extension('cogs.joinsound')
         print("Loaded extension: cogs.joinsound")
+        await self.load_extension('cogs.soundboard')
+        print("Loaded extension: cogs.soundboard")
 
         # Sync slash commands
         if TEST_GUILD_ID:

@@ -10,6 +10,7 @@ logger = logging.getLogger('sargam.database')
 DB_DIR = os.getenv('DATA_DIR', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data'))
 DB_PATH = os.path.join(DB_DIR, 'sargam.db')
 SOUNDS_DIR = os.path.join(DB_DIR, 'joinsounds')
+SOUNDBOARD_DIR = os.path.join(DB_DIR, 'soundboard')
 
 
 class Database:
@@ -25,6 +26,7 @@ class Database:
     def _ensure_dirs(self):
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         os.makedirs(SOUNDS_DIR, exist_ok=True)
+        os.makedirs(SOUNDBOARD_DIR, exist_ok=True)
 
     # ==================== INITIALIZATION & MIGRATIONS ====================
 
@@ -69,6 +71,20 @@ class Database:
                             node TEXT PRIMARY KEY,
                             last_heartbeat TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                         );
+
+                        CREATE TABLE IF NOT EXISTS soundboard_sounds (
+                            id SERIAL PRIMARY KEY,
+                            guild_id BIGINT NOT NULL,
+                            sound_name TEXT NOT NULL,
+                            emoji TEXT,
+                            audio_data BYTEA NOT NULL,
+                            volume INTEGER NOT NULL DEFAULT 100,
+                            created_by BIGINT,
+                            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(guild_id, sound_name)
+                        );
+                        CREATE INDEX IF NOT EXISTS idx_soundboard_guild 
+                        ON soundboard_sounds(guild_id);
                     """)
                 logger.info("Connected to Neon / PostgreSQL and verified schema.")
                 return
@@ -122,6 +138,24 @@ class Database:
                     last_heartbeat TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS soundboard_sounds (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    sound_name TEXT NOT NULL,
+                    emoji TEXT,
+                    audio_data BLOB,
+                    sound_path TEXT,
+                    volume INTEGER NOT NULL DEFAULT 100,
+                    created_by INTEGER,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(guild_id, sound_name)
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_soundboard_guild 
+                ON soundboard_sounds(guild_id)
+            """)
             conn.commit()
 
     # ==================== AUDIO CACHE HELPER ====================
@@ -139,6 +173,26 @@ class Database:
         cache_path = os.path.join(guild_dir, f"{user_id}_{sound_name}")
         
         # Write only if file doesn't exist or is empty
+        if not os.path.exists(cache_path) or os.path.getsize(cache_path) == 0:
+            with open(cache_path, 'wb') as f:
+                f.write(audio_data)
+        return cache_path
+
+    def _ensure_local_soundboard_file(self, guild_id: int, sound_name: str, audio_data: bytes) -> str:
+        """
+        Ensures the soundboard audio bytes are written to a local file in SOUNDBOARD_DIR
+        so FFmpeg can stream it reliably.
+        """
+        guild_dir = os.path.join(SOUNDBOARD_DIR, str(guild_id))
+        os.makedirs(guild_dir, exist_ok=True)
+        ext = os.path.splitext(sound_name)[1].lower()
+        if not ext:
+            ext = ".mp3"
+        safe_name = "".join(c for c in os.path.splitext(sound_name)[0] if c.isalnum() or c in ('_', '-'))
+        if not safe_name:
+            safe_name = "sound"
+        cache_path = os.path.join(guild_dir, f"{safe_name}{ext}")
+
         if not os.path.exists(cache_path) or os.path.getsize(cache_path) == 0:
             with open(cache_path, 'wb') as f:
                 f.write(audio_data)
@@ -280,6 +334,155 @@ class Database:
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT guild_id, user_id, sound_name, volume, enabled FROM join_sounds WHERE guild_id = ? ORDER BY user_id ASC",
+                    (guild_id,)
+                )
+                return [dict(row) for row in cursor.fetchall()]
+
+        return await asyncio.to_thread(_list)
+
+    # ==================== SOUNDBOARD CRUD ====================
+
+    async def get_soundboard_sound(self, guild_id: int, sound_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves a soundboard sound by name and ensures its audio file exists on disk.
+        """
+        sound_name_clean = sound_name.strip().lower()
+        if self.is_postgres and self.pool:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT id, guild_id, sound_name, emoji, audio_data, volume, created_by, created_at "
+                    "FROM soundboard_sounds WHERE guild_id = $1 AND LOWER(sound_name) = $2",
+                    int(guild_id), sound_name_clean
+                )
+                if not row:
+                    return None
+                data = dict(row)
+                data['sound_path'] = self._ensure_local_soundboard_file(guild_id, data['sound_name'], data['audio_data'])
+                return data
+
+        def _get():
+            with self._get_sqlite_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id, guild_id, sound_name, emoji, audio_data, sound_path, volume, created_by, created_at "
+                    "FROM soundboard_sounds WHERE guild_id = ? AND LOWER(sound_name) = ?",
+                    (guild_id, sound_name_clean)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                data = dict(row)
+                if data.get('audio_data'):
+                    data['sound_path'] = self._ensure_local_soundboard_file(guild_id, data['sound_name'], data['audio_data'])
+                return data
+
+        return await asyncio.to_thread(_get)
+
+    async def add_soundboard_sound(
+        self,
+        guild_id: int,
+        sound_name: str,
+        audio_data: bytes,
+        emoji: Optional[str] = None,
+        volume: int = 100,
+        created_by: Optional[int] = None
+    ) -> str:
+        """
+        Saves or updates a soundboard sound in the database and ensures local cache.
+        Returns the local path to the audio file.
+        """
+        sound_name_clean = sound_name.strip().lower()
+        local_path = self._ensure_local_soundboard_file(guild_id, sound_name_clean, audio_data)
+
+        if self.is_postgres and self.pool:
+            now = datetime.utcnow()
+            async with self.pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO soundboard_sounds (guild_id, sound_name, emoji, audio_data, volume, created_by, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT(guild_id, sound_name) DO UPDATE SET
+                        emoji = EXCLUDED.emoji,
+                        audio_data = EXCLUDED.audio_data,
+                        volume = EXCLUDED.volume,
+                        created_by = EXCLUDED.created_by,
+                        created_at = EXCLUDED.created_at
+                """, int(guild_id), sound_name_clean, emoji, audio_data, volume, int(created_by) if created_by else None, now)
+            return local_path
+
+        def _add():
+            now = datetime.utcnow().isoformat()
+            with self._get_sqlite_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO soundboard_sounds (guild_id, sound_name, emoji, audio_data, sound_path, volume, created_by, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(guild_id, sound_name) DO UPDATE SET
+                        emoji = excluded.emoji,
+                        audio_data = excluded.audio_data,
+                        sound_path = excluded.sound_path,
+                        volume = excluded.volume,
+                        created_by = excluded.created_by,
+                        created_at = excluded.created_at
+                """, (guild_id, sound_name_clean, emoji, audio_data, local_path, volume, created_by, now))
+                conn.commit()
+
+        await asyncio.to_thread(_add)
+        return local_path
+
+    async def remove_soundboard_sound(self, guild_id: int, sound_name: str) -> bool:
+        """
+        Deletes a soundboard sound from database and deletes its local cached file.
+        """
+        sound_name_clean = sound_name.strip().lower()
+        sound = await self.get_soundboard_sound(guild_id, sound_name_clean)
+        if not sound:
+            return False
+
+        if sound.get('sound_path') and os.path.exists(sound['sound_path']):
+            try:
+                os.remove(sound['sound_path'])
+            except Exception:
+                pass
+
+        if self.is_postgres and self.pool:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM soundboard_sounds WHERE guild_id = $1 AND LOWER(sound_name) = $2",
+                    int(guild_id), sound_name_clean
+                )
+            return True
+
+        def _remove():
+            with self._get_sqlite_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM soundboard_sounds WHERE guild_id = ? AND LOWER(sound_name) = ?",
+                    (guild_id, sound_name_clean)
+                )
+                conn.commit()
+
+        await asyncio.to_thread(_remove)
+        return True
+
+    async def list_soundboard_sounds(self, guild_id: int) -> List[Dict[str, Any]]:
+        """
+        Lists all soundboard sounds for a guild sorted alphabetically.
+        """
+        if self.is_postgres and self.pool:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT id, guild_id, sound_name, emoji, volume, created_by, created_at "
+                    "FROM soundboard_sounds WHERE guild_id = $1 ORDER BY sound_name ASC",
+                    int(guild_id)
+                )
+                return [dict(r) for r in rows]
+
+        def _list():
+            with self._get_sqlite_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id, guild_id, sound_name, emoji, volume, created_by, created_at "
+                    "FROM soundboard_sounds WHERE guild_id = ? ORDER BY sound_name ASC",
                     (guild_id,)
                 )
                 return [dict(row) for row in cursor.fetchall()]

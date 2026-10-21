@@ -166,6 +166,16 @@ class AudioMixer(discord.AudioSource):
             self.overlays.append(overlay)
         return overlay
 
+    def clear_overlays(self):
+        """Stops and clears all active overlay sound effects without stopping music."""
+        with self._lock:
+            for ov in self.overlays:
+                try:
+                    ov.cleanup()
+                except Exception:
+                    pass
+            self.overlays.clear()
+
     def stop_all(self):
         """Stops music and all active overlays."""
         callback = None
