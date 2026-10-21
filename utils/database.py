@@ -33,7 +33,13 @@ class Database:
         if self.is_postgres:
             try:
                 import asyncpg
-                self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=10)
+                self.pool = await asyncpg.create_pool(
+                    self.dsn,
+                    min_size=0,
+                    max_size=5,
+                    max_inactive_connection_lifetime=30.0,
+                    command_timeout=15.0
+                )
                 async with self.pool.acquire() as conn:
                     await conn.execute("""
                         CREATE TABLE IF NOT EXISTS join_sounds (
@@ -371,19 +377,22 @@ class Database:
     # ==================== CLUSTER & ACTIVE NODE COORDINATION ====================
 
     async def update_heartbeat(self, node: str):
-        """Update or insert active heartbeat for this node."""
+        """Update or insert active heartbeat for this node with automatic retries."""
         if self.is_postgres:
-            try:
-                async with self.pool.acquire() as conn:
-                    await conn.execute("""
-                        INSERT INTO cluster_heartbeat (node, last_heartbeat)
-                        VALUES ($1, CURRENT_TIMESTAMP)
-                        ON CONFLICT (node) DO UPDATE SET last_heartbeat = CURRENT_TIMESTAMP;
-                    """, node)
-                return
-            except Exception as e:
-                logger.error(f"Failed to update cluster heartbeat on Postgres: {e}")
-                return
+            for attempt in range(3):
+                try:
+                    async with self.pool.acquire() as conn:
+                        await conn.execute("""
+                            INSERT INTO cluster_heartbeat (node, last_heartbeat)
+                            VALUES ($1, CURRENT_TIMESTAMP)
+                            ON CONFLICT (node) DO UPDATE SET last_heartbeat = CURRENT_TIMESTAMP;
+                        """, node)
+                    return
+                except Exception as e:
+                    if attempt == 2:
+                        logger.error(f"Failed to update cluster heartbeat on Postgres: {e}")
+                    await asyncio.sleep(1.0)
+            return
 
         def _sync():
             try:
@@ -399,21 +408,24 @@ class Database:
 
         await asyncio.to_thread(_sync)
 
-    async def is_node_active(self, node: str, timeout_seconds: int = 20) -> bool:
-        """Check if a specific node has sent a heartbeat within the timeout window."""
+    async def is_node_active(self, node: str, timeout_seconds: int = 45) -> bool:
+        """Check if a specific node has sent a heartbeat within the timeout window with retries."""
         if self.is_postgres:
-            try:
-                async with self.pool.acquire() as conn:
-                    row = await conn.fetchrow("""
-                        SELECT EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_heartbeat)) as diff
-                        FROM cluster_heartbeat WHERE node = $1;
-                    """, node)
-                    if row and row['diff'] is not None:
-                        return float(row['diff']) < timeout_seconds
-                    return False
-            except Exception as e:
-                logger.error(f"Failed to query node activity on Postgres: {e}")
-                return False
+            for attempt in range(3):
+                try:
+                    async with self.pool.acquire() as conn:
+                        row = await conn.fetchrow("""
+                            SELECT EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_heartbeat)) as diff
+                            FROM cluster_heartbeat WHERE node = $1;
+                        """, node)
+                        if row and row['diff'] is not None:
+                            return float(row['diff']) < timeout_seconds
+                        return False
+                except Exception as e:
+                    if attempt == 2:
+                        logger.error(f"Failed to query node activity on Postgres: {e}")
+                    await asyncio.sleep(1.0)
+            return False
 
         def _sync():
             try:

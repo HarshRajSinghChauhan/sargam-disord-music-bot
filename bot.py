@@ -126,19 +126,28 @@ async def run_cloud_node():
     
     while True:
         # Check if laptop is currently active
-        laptop_active = await db.is_node_active('laptop', timeout_seconds=15)
+        laptop_active = await db.is_node_active('laptop', timeout_seconds=45)
         if laptop_active:
-            print("[Cluster] Laptop is currently ACTIVE. Render entering STANDBY mode (checking every 5s)...", flush=True)
-            while await db.is_node_active('laptop', timeout_seconds=15):
+            print("[Cluster] Laptop is currently ACTIVE. Render entering STANDBY mode...", flush=True)
+            inactive_count = 0
+            while True:
                 await asyncio.sleep(5)
-            print("[Cluster] Laptop became OFFLINE! Render taking over Discord bot...", flush=True)
+                active = await db.is_node_active('laptop', timeout_seconds=45)
+                if not active:
+                    inactive_count += 1
+                    # Require 3 consecutive inactive checks (15s buffer after 45s timeout = 60s total)
+                    if inactive_count >= 3:
+                        print("[Cluster] Laptop confirmed OFFLINE. Render taking over Discord bot...", flush=True)
+                        break
+                else:
+                    inactive_count = 0
             
         bot = MusicBot()
         bot_task = asyncio.create_task(bot.start(TOKEN))
         
         while not bot.is_closed():
             await asyncio.sleep(5)
-            if await db.is_node_active('laptop', timeout_seconds=15):
+            if await db.is_node_active('laptop', timeout_seconds=45):
                 print("[Cluster] Laptop became ACTIVE! Render yielding Discord connection...", flush=True)
                 await bot.close()
                 break
